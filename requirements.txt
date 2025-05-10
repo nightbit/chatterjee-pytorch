@@ -1,0 +1,7 @@
+torch
+torchvision
+torchsort==0.1.9
+matplotlib
+pandas
+scikit-learn
+awscli
