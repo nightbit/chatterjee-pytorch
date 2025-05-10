@@ -1,8 +1,8 @@
 import torch
 import torchsort
 
-# 1) Use CPU on Mac
-device = "cpu"
+# 1) Use GPU on cloud
+device = "cuda" if torch.cuda.is_available() else "cpu"
 print(device)
 
 # 2) Create a 1×8 tensor with requires_grad
