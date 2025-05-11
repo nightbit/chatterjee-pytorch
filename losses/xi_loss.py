@@ -1,4 +1,3 @@
-#xi_loss.py
 import torch
 import torch.nn as nn
 import torchsort
@@ -29,14 +28,22 @@ class XiLoss(nn.Module):
         perm = torch.argsort(y_true, dim=0)
         y_pred_ord = y_pred[perm]
 
-        # differentiable ranks of predictions
-        ranks = torchsort.soft_rank(
+        # exact ranks (hard) for forward pass
+        hard_ranks = torch.argsort(torch.argsort(y_pred_ord, dim=0), dim=0)
+        hard_ranks = hard_ranks.to(y_pred_ord.dtype) + 1.0
+
+        # soft ranks (differentiable proxy) for backward pass
+        soft_ranks = torchsort.soft_rank(
             y_pred_ord.unsqueeze(0),
             regularization="l2",
             regularization_strength=self.tau,
         ).squeeze(0)
 
-        # ξₙ
+        # straight-through combination:
+        #   forward uses hard_ranks, backward uses soft_ranks
+        ranks = hard_ranks + (soft_ranks - soft_ranks.detach())
+
+        # compute ξₙ
         diffs = torch.abs(ranks[1:] - ranks[:-1]).sum()
         xi_soft = 1.0 - 3.0 * diffs / (n ** 2 - 1)
 
@@ -51,16 +58,17 @@ def xi_hard(x: torch.Tensor, y: torch.Tensor):
         raise ValueError("Shapes differ.")
     n = x.numel()
     if n < 2:
-        raise ValueError("Need at least 2")
+        raise ValueError("Need at least 2 samples.")
     if torch.allclose(y, y[0]):
         raise ValueError("y is constant.")
 
     # reorder by x
     idx = torch.argsort(x, dim=0)
     y_ord = y[idx]
-    # ranks of y_ord (ties: average rank)
-    ranks = torch.argsort(torch.argsort(y_ord))
-    # +1 to make it 1-based like soft_rank
-    ranks = ranks.to(dtype=torch.float64) + 1
-    xi = 1.0 - 3.0 * torch.abs(ranks[1:] - ranks[:-1]).sum() / (n**2 - 1)
+
+    # hard ranks of y_ord (0-based → +1 for 1-based)
+    ranks = torch.argsort(torch.argsort(y_ord, dim=0), dim=0)
+    ranks = ranks.to(dtype=torch.float64) + 1.0
+
+    xi = 1.0 - 3.0 * torch.abs(ranks[1:] - ranks[:-1]).sum() / (n ** 2 - 1)
     return xi.to(dtype=x.dtype)
