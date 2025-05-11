@@ -54,8 +54,9 @@ class XiLoss(nn.Module):
         # --- differentiable ξ̃ₙ ------------------------------------------
         P = _soft_perm(preds, self.tau)               # (n,n)
         r_y = torchsort.soft_rank(
-            target, regularization_strength=self.tau
-        )                                             # (n,)
+            target.unsqueeze(0), 
+            regularization_strength=self.tau
+        ).squeeze(0)                                             # (n,)
         r_sorted = P @ r_y.unsqueeze(-1)              # (n,1)
         r_sorted = r_sorted.squeeze(-1)               # (n,)
 
