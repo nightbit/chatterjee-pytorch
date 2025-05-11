@@ -6,17 +6,30 @@ __all__ = ["XiLoss", "xi_hard"]
 
 def _soft_perm(scores: torch.Tensor, tau: float) -> torch.Tensor:
     """
-    NeuralSort soft permutation matrix (Grover et al., 2019)
-
-    scores: (n,) 1‑D tensor
-    tau   : temperature (>0)
-    returns P̂ ∈ ℝ^{n×n} row‑stochastic
+    NeuralSort soft permutation (Grover et al., ICLR 2019).
+    Returns a unimodal row-stochastic matrix P̂ ∈ ℝ^{n×n} that
+    in the τ→0 limit becomes the ascending-sort permutation by `scores`.
     """
     n = scores.size(0)
-    scores_row = scores.unsqueeze(0)         # (1,n)
-    scores_col = scores.unsqueeze(1)         # (n,1)
-    pairwise_diff = scores_col - scores_row  # (n,n)
-    P_hat = torch.softmax(-pairwise_diff / tau, dim=1)  # row‑wise
+    device = scores.device
+
+    # To sort ascending, flip sign (NeuralSort sorts descending by default)
+    s = -scores
+
+    # pairwise absolute differences A_ij = |s_i - s_j|
+    diff = s.unsqueeze(1) - s.unsqueeze(0)       # (n,n)
+    A_sum = diff.abs().sum(dim=1)               # (n,)
+
+    # row-scaling weights: (n+1−2i) for i=1…n
+    idx = torch.arange(1, n+1, device=device)   # (n,)
+    coeff = (n + 1 - 2*idx).unsqueeze(1)        # (n,1)
+
+    # build the score matrix for softmax
+    # v[i,j] = coeff[i] * s[j]  -  A_sum[j]
+    v = coeff * s.unsqueeze(0) - A_sum.unsqueeze(0)  # (n,n)
+
+    # row-wise softmax
+    P_hat = torch.softmax(v / tau, dim=1)       # (n,n)
     return P_hat
 
 
