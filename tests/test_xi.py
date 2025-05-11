@@ -107,3 +107,46 @@ def test_gradient_flow_soft_xi():
 
     grad_norm = x.grad.norm().item()
     assert grad_norm > 1e-4, f"Gradient norm too small: {grad_norm:.2e}"
+
+# new tests v2
+
+# in test_xi.py
+def test_hard_and_soft_decreasing_monotonic():
+    n = 128
+    x = torch.linspace(0,1,n)
+    y_inc = 5*x + 2
+    y_dec = -1 * y_inc + 10
+    xi_inc = xi_hard(x, y_inc)
+    xi_dec = xi_hard(x, y_dec)
+    assert torch.isclose(xi_inc, xi_dec, atol=1e-8)
+
+    loss_fn = XiLoss(tau=0.1, lambda_=1.0)
+    _, xi_soft_inc = loss_fn(x.requires_grad_(), y_inc)
+    _, xi_soft_dec = loss_fn(x.requires_grad_(), y_dec)
+    assert torch.isclose(xi_soft_inc, xi_soft_dec, atol=1e-5)
+
+def test_shape_mismatch_raises():
+    loss_fn = XiLoss()
+    y_pred = torch.randn(10,1)
+    y_true = torch.randn(10)
+    with pytest.raises(ValueError):
+        _ = loss_fn(y_pred, y_true)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="No CUDA")
+def test_gpu_forward_and_backward():
+    device = torch.device("cuda")
+    loss_fn = XiLoss().to(device)
+    x = torch.randn(64, device=device, requires_grad=True)
+    y = 2*x + 1
+    total, xi = loss_fn(x, y)
+    total.backward()
+    assert x.grad is not None and x.grad.norm() > 0
+
+def test_soft_matches_hard_on_perfect():
+    n = 100
+    x = torch.linspace(-1,1,n)
+    y = x**3  # perfectly monotonic
+    hard = xi_hard(x, y)
+    _, soft = XiLoss(tau=0.01, lambda_=1.0)(x, y)
+    assert torch.isclose(soft, hard, atol=1e-3), f"{soft} vs {hard}"
