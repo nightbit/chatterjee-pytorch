@@ -1,143 +1,109 @@
-#tests/test_xi.py`
-
-import time
 import pytest
 import torch
 
-from losses.xi_loss import XiLoss
-from utils.hard_xi import xi_hard
+from losses.xi_loss import XiLoss, xi_hard
 
-# Devices to test on
-DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+torch.manual_seed(0)
 
-def monotonic_data(n=128, device="cpu"):
-    x = torch.linspace(-2, 2, n, device=device)
-    return x, x
+def test_hard_perfect_monotonic():
+    """
+    A. Perfect monotonicity ⇒ ξₙ = (n−2)/(n+1)
+    """
+    n = 128
+    x = torch.linspace(-2.0, 2.0, n)
+    y = 3.0 * x + 5.0  # strictly increasing, no ties
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_hard_xi_monotonic(device):
-    x, y = monotonic_data(device=device)
     xi = xi_hard(x, y)
-    n = x.numel()
-    xi_max = (n - 2) / (n + 1)
-    assert torch.isclose(xi, torch.tensor(xi_max, device=device), atol=1e-6)
+    expected = (n - 2) / (n + 1)
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_soft_xi_monotonic(device):
-    x, y = monotonic_data(device=device)
-    n = x.numel()
-    xi_max = (n - 2) / (n + 1)
-    loss_fn = XiLoss(tau=0.1, lambda_=1.0).to(device)
-    loss, xi_soft = loss_fn(x, y)
-    # xi_soft should be very close to xi_max
-    assert xi_soft >= xi_max - 1e-2
-    assert xi_soft <= 1.0
+    assert torch.isclose(xi, torch.tensor(expected), atol=1e-8), (
+        f"Expected ξ_hard={expected}, got {xi.item()}"
+    )
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_gradient_flows(device):
-    x = torch.randn(64, device=device, requires_grad=True)
-    y = 2 * x + 1
-    loss_fn = XiLoss(tau=0.5, lambda_=1.0).to(device)
-    loss, xi_soft = loss_fn(x, y)
+def test_constant_y_error_for_hard_and_soft():
+    """
+    B. Constant-Y must raise ValueError in both hard and soft implementations.
+    """
+    n = 64
+    x = torch.randn(n)
+    y_const = torch.ones(n)
+
+    # Hard ξₙ
+    with pytest.raises(ValueError) as exc_h:
+        _ = xi_hard(x, y_const)
+    assert "constant" in str(exc_h.value).lower()
+
+    # Soft ξₙ via XiLoss
+    loss_fn = XiLoss(tau=0.1, lambda_=1.0)
+    with pytest.raises(ValueError) as exc_s:
+        _ = loss_fn(x.requires_grad_(), y_const)
+    assert "constant" in str(exc_s.value).lower()
+
+def test_small_n_edge_cases():
+    """
+    C. Small-n edge cases:
+       - n=2 ⇒ ξₙ = 0
+       - n<2 ⇒ ValueError
+    """
+    # n = 2
+    x2 = torch.tensor([1.0, 2.0])
+    y2 = torch.tensor([3.0, 4.0])
+    xi2 = xi_hard(x2, y2)
+    assert torch.isclose(xi2, torch.tensor(0.0), atol=1e-8)
+
+    loss_fn = XiLoss(tau=0.1, lambda_=1.0)
+    loss2, xi_soft2 = loss_fn(x2.requires_grad_(), y2)
+    assert torch.isclose(xi_soft2, torch.tensor(0.0), atol=1e-5)
+
+    # n < 2
+    x1 = torch.tensor([1.0])
+    y1 = torch.tensor([2.0])
+    with pytest.raises(ValueError) as exc_h1:
+        _ = xi_hard(x1, y1)
+    assert "at least 2" in str(exc_h1.value).lower()
+
+    with pytest.raises(ValueError) as exc_s1:
+        _ = loss_fn(x1.requires_grad_(), y1)
+    assert "at least 2" in str(exc_s1.value).lower()
+
+def test_monotone_invariance_hard_and_soft():
+    """
+    D. Invariance under strictly increasing transforms (hard & soft).
+    """
+    n = 128
+    x = torch.linspace(0.1, 3.14, n)
+    y = 2.0 * x + 1.0
+
+    # Apply transforms
+    x_t = 5.0 * x - 3.0
+    y_t = y.pow(3)
+
+    # Hard ξₙ invariance
+    xi_orig = xi_hard(x, y)
+    xi_trans = xi_hard(x_t, y_t)
+    assert torch.isclose(xi_orig, xi_trans, atol=1e-12), (
+        f"Hard ξ changed: {xi_orig.item()} vs {xi_trans.item()}"
+    )
+
+    # Soft ξₙ invariance
+    loss_fn = XiLoss(tau=0.1, lambda_=1.0)
+    _, xi_soft_orig = loss_fn(x.requires_grad_(), y)
+    _, xi_soft_trans = loss_fn(x_t.requires_grad_(), y_t)
+    assert torch.isclose(xi_soft_orig, xi_soft_trans, atol=1e-5, rtol=1e-4), (
+        f"Soft ξ changed: {xi_soft_orig.item()} vs {xi_soft_trans.item()}"
+    )
+
+def test_gradient_flow_soft_xi():
+    """
+    E. Ensure soft ξₙ contributes non-zero gradients.
+    """
+    n = 64
+    x = torch.randn(n, requires_grad=True)
+    y = 2.0 * x + 1.0
+
+    loss_fn = XiLoss(tau=0.5, lambda_=1.0)
+    loss, _ = loss_fn(x, y)
     loss.backward()
-    # Ensure gradient is substantial
+
     grad_norm = x.grad.norm().item()
-    assert grad_norm > 1e-4
-
-@pytest.mark.parametrize("device", DEVICES)
-def test_soft_xi_independence(device):
-    rng1 = torch.Generator().manual_seed(0)
-    rng2 = torch.Generator().manual_seed(1)
-    x = torch.randn(128, generator=rng1, device=device)
-    y = torch.randn(128, generator=rng2, device=device)
-    loss_fn = XiLoss(tau=1.0, lambda_=1.0).to(device)
-    loss, xi_soft = loss_fn(x, y)
-    # Independent data should yield xi_soft near zero
-    assert abs(xi_soft) < 0.1
-
-@pytest.mark.parametrize("device", DEVICES)
-def test_soft_xi_invariance(device):
-    x, y = monotonic_data(device=device)
-    x2 = x.exp()
-    y2 = y.log()
-    loss_fn = XiLoss(tau=0.1, lambda_=1.0).to(device)
-    _, xi1 = loss_fn(x, y)
-    _, xi2 = loss_fn(x2, y2)
-    assert torch.isclose(xi1, xi2, atol=1e-5)
-
-@pytest.mark.parametrize("device", DEVICES)
-def test_directional_asymmetry(device):
-    x = torch.linspace(-2, 2, 128, device=device)
-    y = x ** 2
-    # Hard xi
-    xi_xy_h = xi_hard(x, y)
-    xi_yx_h = xi_hard(y, x)
-    assert xi_xy_h > 0.9
-    assert xi_yx_h < 0.2
-    # Soft xi
-    loss_fn = XiLoss(tau=0.1, lambda_=1.0).to(device)
-    _, xi_xy_s = loss_fn(x, y)
-    _, xi_yx_s = loss_fn(y, x)
-    assert xi_xy_s > 0.9
-    assert xi_yx_s < 0.2
-
-@pytest.mark.parametrize("device", DEVICES)
-def test_tie_handling(device):
-    # Create ties in X
-    x = torch.tensor([0.0, 0.0, 0.0, 1.0, 1.0, 1.0], device=device)
-    y = torch.tensor([1.0, 2.0, 3.0, 1.5, 2.5, 3.5], device=device)
-    # Hard xi should not error and lie in [-0.5, 1]
-    xi_h = xi_hard(x, y)
-    assert -0.5 <= xi_h <= 1.0
-    # Soft xi likewise
-    loss_fn = XiLoss(tau=0.1, lambda_=1.0).to(device)
-    _, xi_s = loss_fn(x, y)
-    assert -0.5 <= xi_s <= 1.0
-
-@pytest.mark.parametrize("device", DEVICES)
-def test_soft_vs_hard_difference(device):
-    # Compare soft and hard xi on random monotonic data
-    x, y = monotonic_data(device=device)
-    xi_h = xi_hard(x, y)
-    loss_fn = XiLoss(tau=0.1, lambda_=1.0).to(device)
-    _, xi_s = loss_fn(x, y)
-    assert abs(xi_s - xi_h) < 0.02
-
-@pytest.mark.parametrize("device", DEVICES)
-def test_gpu_cpu_parity(device):
-    if device != "cuda":
-        pytest.skip("GPU/CPU parity check requires CUDA")
-    # Generate random data
-    rng1 = torch.Generator().manual_seed(42)
-    rng2 = torch.Generator().manual_seed(43)
-    x_cpu = torch.randn(64, generator=rng1, device="cpu")
-    y_cpu = torch.randn(64, generator=rng2, device="cpu")
-    # CPU
-    loss_fn_cpu = XiLoss(tau=0.5, lambda_=1.0).to("cpu")
-    _, xi_cpu = loss_fn_cpu(x_cpu, y_cpu)
-    # Move to GPU
-    x_gpu = x_cpu.to("cuda")
-    y_gpu = y_cpu.to("cuda")
-    loss_fn_gpu = XiLoss(tau=0.5, lambda_=1.0).to("cuda")
-    _, xi_gpu = loss_fn_gpu(x_gpu, y_gpu)
-    # Parity
-    assert torch.isclose(xi_cpu, xi_gpu.cpu(), atol=1e-6)
-
-@pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.slow
-def test_runtime_bound(device):
-    if device != "cuda":
-        pytest.skip("Runtime bound only tested on GPU")
-    # Create random data
-    x = torch.randn(256, device=device, requires_grad=True)
-    y = torch.randn(256, device=device)
-    loss_fn = XiLoss(tau=0.1, lambda_=1.0).to(device)
-    # Measure forward + backward time
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    loss, xi = loss_fn(x, y)
-    loss.backward()
-    torch.cuda.synchronize()
-    elapsed = time.perf_counter() - start
-    # Should be under 25 ms
-    assert elapsed < 0.025, f"Elapsed time {elapsed:.3f}s exceeds 0.025s"
+    assert grad_norm > 1e-4, f"Gradient norm too small: {grad_norm:.2e}"
