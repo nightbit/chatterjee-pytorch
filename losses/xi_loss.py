@@ -1,14 +1,16 @@
 import torch
 import torch.nn as nn
 import torchsort
+_TIE_EPS = 1e-6  # magnitude of the random jitter used to break exact ties
 
 class XiLoss(nn.Module):
     def __init__(self, tau: float = 0.1, lambda_: float = 1.0,
-                 task_loss_fn: nn.Module | None = None):
+                 task_loss_fn: nn.Module | None = None,
+                 epsilon: float = _TIE_EPS):          # NEW
         super().__init__()
         self.tau = float(tau)
         self.lambda_ = float(lambda_)
-        # default regression task loss: MSE
+        self.epsilon = float(epsilon)                # NEW
         self.task_loss = task_loss_fn or nn.MSELoss()
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor):
@@ -24,9 +26,21 @@ class XiLoss(nn.Module):
         y_true = y_true.reshape(-1)
         n = y_true.numel()
 
+        # ----- minimal tie-breaking for y_true -----
+        if self.epsilon > 0.0:
+            with torch.no_grad():  # keep jitter out of autograd graph
+                y_true = y_true + (torch.rand_like(y_true) - 0.5) * self.epsilon
+
         # argsort by y_true (no grad needed)
         perm = torch.argsort(y_true, dim=0)
         y_pred_ord = y_pred[perm]
+
+        # ----- minimal tie-breaking for y_pred_ord -----
+        if self.epsilon > 0.0:
+            with torch.no_grad():
+                y_pred_ord = y_pred_ord + (torch.rand_like(y_pred_ord) - 0.5) * self.epsilon
+# -----------------------------------------------
+
 
         # exact ranks (hard) for forward pass
         hard_ranks = torch.argsort(torch.argsort(y_pred_ord, dim=0), dim=0)
@@ -53,10 +67,13 @@ class XiLoss(nn.Module):
         return total, xi_soft
 
 
-def xi_hard(x: torch.Tensor, y: torch.Tensor):
+def xi_hard(x: torch.Tensor, y: torch.Tensor, epsilon: float = _TIE_EPS):
     if x.shape != y.shape:
         raise ValueError("Shapes differ.")
     n = x.numel()
+    if epsilon > 0.0:
+        with torch.no_grad():
+            y = y + (torch.rand_like(y) - 0.5) * epsilon
     if n < 2:
         raise ValueError("Need at least 2 samples.")
     if torch.allclose(y, y[0]):
@@ -65,6 +82,9 @@ def xi_hard(x: torch.Tensor, y: torch.Tensor):
     # reorder by x
     idx = torch.argsort(x, dim=0)
     y_ord = y[idx]
+    if epsilon > 0.0:
+        with torch.no_grad():
+            y_ord = y_ord + (torch.rand_like(y_ord) - 0.5) * epsilon
 
     # hard ranks of y_ord (0-based → +1 for 1-based)
     ranks = torch.argsort(torch.argsort(y_ord, dim=0), dim=0)

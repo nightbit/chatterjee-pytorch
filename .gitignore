@@ -5,3 +5,4 @@ data/*
 models/*
 !data/.gitkeep
 !models/.gitkeep
+.DS_Store
