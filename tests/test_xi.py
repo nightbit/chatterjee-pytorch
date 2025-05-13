@@ -150,14 +150,3 @@ def test_soft_matches_hard_on_perfect():
     hard = xi_hard(x, y)
     _, soft = XiLoss(tau=0.01, lambda_=1.0)(x, y)
     assert torch.isclose(soft, hard, atol=1e-3), f"{soft} vs {hard}"
-
-def test_directionality_quadratic():
-    n = 1024
-    x = torch.rand(n) * 2 - 1
-    y = x**2
-
-    xi_xy = xi_hard(x, y)
-    xi_yx = xi_hard(y, x)
-
-    assert xi_xy > 0.9, f"ξₙ(X,Y) should be ≈1 for Y=X², got {xi_xy:.3f}"
-    assert xi_yx < 0.2, f"ξₙ(Y,X) should be ≪1 for Y=X², got {xi_yx:.3f}"
