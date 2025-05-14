@@ -22,7 +22,7 @@ repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from xi_loss import XiLoss, xi_hard   # local module
+from losses.xi_loss import XiLoss, xi_hard   # local module
 
 # ---------- constants ----------
 SEED = 42
