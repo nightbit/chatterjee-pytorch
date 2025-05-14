@@ -4,69 +4,16 @@ import torch.optim as optim
 import torchsort
 import random
 
+import sys
+import os
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
 # ---------------------------------------------------------------------------
-# XiLoss Implementation (straight-through for ranking) to keep everything local
+# Import XiLoss from your existing implementation
 # ---------------------------------------------------------------------------
-_TIE_EPS = 1e-6
-
-class XiLoss(nn.Module):
-    def __init__(self, tau: float = 0.1, lambda_: float = 1.0,
-                 task_loss_fn: nn.Module | None = None,
-                 epsilon: float = _TIE_EPS):
-        super().__init__()
-        self.tau = float(tau)
-        self.lambda_ = float(lambda_)
-        self.epsilon = float(epsilon)
-        self.task_loss = task_loss_fn or nn.MSELoss()
-
-    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor):
-        if y_pred.shape != y_true.shape:
-            raise ValueError("y_pred and y_true must have identical shape.")
-        if y_true.numel() < 2:
-            raise ValueError("Xi requires at least 2 samples.")
-        if torch.allclose(y_true, y_true[0]):
-            raise ValueError("y_true is constant — xi is undefined.")
-
-        # flatten to 1-D
-        y_pred = y_pred.reshape(-1)
-        y_true = y_true.reshape(-1)
-        n = y_true.numel()
-
-        # minimal tie-breaking for y_true
-        if self.epsilon > 0.0:
-            with torch.no_grad():
-                y_true = y_true + (torch.rand_like(y_true) - 0.5) * self.epsilon
-
-        # reorder predictions by sorted true y
-        perm = torch.argsort(y_true, dim=0)
-        y_pred_ord = y_pred[perm]
-
-        # minimal tie-breaking for y_pred_ord
-        if self.epsilon > 0.0:
-            with torch.no_grad():
-                y_pred_ord = y_pred_ord + (torch.rand_like(y_pred_ord) - 0.5) * self.epsilon
-
-        # hard ranks for forward pass
-        hard_ranks = torch.argsort(torch.argsort(y_pred_ord, dim=0), dim=0).float() + 1.0
-
-        # soft ranks for backward pass
-        soft_ranks = torchsort.soft_rank(
-            y_pred_ord.unsqueeze(0),
-            regularization="l2",
-            regularization_strength=self.tau
-        ).squeeze(0)
-
-        # straight-through
-        ranks = hard_ranks + (soft_ranks - soft_ranks.detach())
-
-        # compute xi
-        diffs = torch.abs(ranks[1:] - ranks[:-1]).sum()
-        xi_soft = 1.0 - 3.0 * diffs / (n**2 - 1)
-
-        # total loss
-        task = self.task_loss(y_pred, y_true)
-        total = task - self.lambda_ * xi_soft
-        return total, xi_soft
+from losses.xi_loss import XiLoss
 
 # ---------------------------------------------------------------------------
 # Synthetic Data Generators
@@ -187,3 +134,37 @@ if __name__ == "__main__":
         lambda_=1.0
     )
     print(f"\nDone! Final MSE={final_mse}, Xi={final_xi}")
+"""
+Epoch 01/30 | MSE=0.433492 | Xi=0.000000 | TotalLoss=0.433492
+Epoch 02/30 | MSE=0.366550 | Xi=0.000000 | TotalLoss=0.366550
+Epoch 03/30 | MSE=0.310941 | Xi=0.000000 | TotalLoss=0.310941
+Epoch 04/30 | MSE=0.267309 | Xi=0.000000 | TotalLoss=0.267309
+Epoch 05/30 | MSE=0.234159 | Xi=0.000000 | TotalLoss=0.234159
+Epoch 06/30 | MSE=0.210137 | Xi=0.554777 | TotalLoss=-0.344640
+Epoch 07/30 | MSE=0.193889 | Xi=0.554777 | TotalLoss=-0.360889
+Epoch 08/30 | MSE=0.184950 | Xi=0.554777 | TotalLoss=-0.369827
+Epoch 09/30 | MSE=0.181214 | Xi=0.554777 | TotalLoss=-0.373563
+Epoch 10/30 | MSE=0.180693 | Xi=0.554777 | TotalLoss=-0.374084
+Epoch 11/30 | MSE=0.181863 | Xi=0.554777 | TotalLoss=-0.372914
+Epoch 12/30 | MSE=0.183065 | Xi=0.554777 | TotalLoss=-0.371712
+Epoch 13/30 | MSE=0.183119 | Xi=0.554777 | TotalLoss=-0.371658
+Epoch 14/30 | MSE=0.181597 | Xi=0.554777 | TotalLoss=-0.373180
+Epoch 15/30 | MSE=0.178449 | Xi=0.554777 | TotalLoss=-0.376329
+Epoch 16/30 | MSE=0.173840 | Xi=0.554777 | TotalLoss=-0.380938
+Epoch 17/30 | MSE=0.168126 | Xi=0.554777 | TotalLoss=-0.386651
+Epoch 18/30 | MSE=0.161881 | Xi=0.554777 | TotalLoss=-0.392896
+Epoch 19/30 | MSE=0.155619 | Xi=0.554777 | TotalLoss=-0.399158
+Epoch 20/30 | MSE=0.149745 | Xi=0.554777 | TotalLoss=-0.405032
+Epoch 21/30 | MSE=0.144657 | Xi=0.554777 | TotalLoss=-0.410121
+Epoch 22/30 | MSE=0.140571 | Xi=0.554777 | TotalLoss=-0.414206
+Epoch 23/30 | MSE=0.137185 | Xi=0.554777 | TotalLoss=-0.417593
+Epoch 24/30 | MSE=0.134246 | Xi=0.554777 | TotalLoss=-0.420531
+Epoch 25/30 | MSE=0.131601 | Xi=0.554777 | TotalLoss=-0.423177
+Epoch 26/30 | MSE=0.129089 | Xi=0.554777 | TotalLoss=-0.425688
+Epoch 27/30 | MSE=0.126563 | Xi=0.554777 | TotalLoss=-0.428215
+Epoch 28/30 | MSE=0.123911 | Xi=0.554777 | TotalLoss=-0.430866
+Epoch 29/30 | MSE=0.121123 | Xi=0.555670 | TotalLoss=-0.434547
+Epoch 30/30 | MSE=0.118346 | Xi=0.551733 | TotalLoss=-0.433387
+
+Done! Final MSE=0.11834610998630524, Xi=0.5517332553863525
+"""

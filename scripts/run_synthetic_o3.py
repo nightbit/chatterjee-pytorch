@@ -24,11 +24,12 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 import sys
+import os
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from xi_loss import XiLoss, xi_hard  # local import
+from losses.xi_loss import XiLoss, xi_hard  # local import
 
 
 # --------------------------- Config constants --------------------------- #
@@ -96,8 +97,10 @@ def train_one_epoch(model, loader, loss_fn, optimizer):
 
 @torch.no_grad()
 def evaluate(model, x_val, y_val):
+    """Return (MSE, xi_n_hard) on the validation split."""
     model.eval()
-    preds = model(x_val.to(DEVICE)).squeeze(1).cpu()
+    # <- FIX: add .unsqueeze(1) so shape becomes [N, 1]
+    preds = model(x_val.unsqueeze(1).to(DEVICE)).squeeze(1).cpu()
     mse = torch.nn.functional.mse_loss(preds, y_val).item()
     xi_h = xi_hard(preds, y_val).item()
     return mse, xi_h
