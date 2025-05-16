@@ -128,8 +128,15 @@ def run_epoch(
     criterion: nn.Module,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None = None,
-) -> tuple[float, float]:
-    running_loss = 0.0
+) -> tuple[float, float, float]:
+    """
+    Returns per-sample averages:
+        total_loss  – (MSE − λ·ξ_soft)
+        mse         – pure MSE
+        xi_soft     – soft ξₙ
+    """
+    running_total = 0.0
+    running_mse = 0.0
     running_xi = 0.0
     count = 0
 
@@ -141,19 +148,22 @@ def run_epoch(
             optimizer.zero_grad()
 
         out = model(X)
-        loss, xi_soft = criterion(out, y)
+        total, xi_soft = criterion(out, y)
+        mse = criterion.task_loss(out, y)
 
         if optimizer:
-            loss.backward()
+            total.backward()
             nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
 
         batch = y.size(0)
-        running_loss += loss.item() * batch
+        running_total += total.item() * batch
+        running_mse += mse.item() * batch
         running_xi += xi_soft.item() * batch
         count += batch
 
-    return running_loss / count, running_xi / count
+    return running_total / count, running_mse / count, running_xi / count
+
 
 
 @torch.no_grad()
@@ -245,22 +255,35 @@ def main(args: argparse.Namespace) -> None:
         elif args.use_xi:
             criterion.lambda_ = args.lambda_coef
 
+        # ---------- Train ----------
         model.train()
-        tr_loss, tr_xi = run_epoch(model, train_loader, criterion, device, optimizer)
-        model.eval()
-        val_loss, val_xi = run_epoch(model, val_loader, criterion, device)
+        tr_total, tr_mse, tr_xi = run_epoch(
+            model, train_loader, criterion, device, optimizer
+        )
 
-        history["train_mse"].append(tr_loss)
+        # ---------- Validate ----------
+        model.eval()
+        with torch.no_grad():
+            val_total, val_mse, val_xi = run_epoch(
+                model, val_loader, criterion, device
+            )
+
+        # ---------- Logging ----------
+        history["train_mse"].append(tr_mse)
         history["train_xi"].append(tr_xi)
-        history["val_mse"].append(val_loss)
+        history["val_mse"].append(val_mse)
         history["val_xi"].append(val_xi)
 
-        if val_loss < best_val_mse:
-            best_val_mse = val_loss
+        if val_mse < best_val_mse:
+            best_val_mse = val_mse
             torch.save(model.state_dict(), checkpoints_dir / "best.pt")
 
         if epoch % 10 == 0 or epoch == args.epochs:
-            print(f"Epoch {epoch:03d}/{args.epochs} | Val MSE {val_loss:.4f} | Val xi {val_xi:.4f}")
+            print(
+                f"Epoch {epoch:03d}/{args.epochs} | "
+                f"Val MSE {val_mse:.4f} | Val xi {val_xi:.4f}"
+            )
+
 
     # Reload best
     model.load_state_dict(torch.load(checkpoints_dir / "best.pt"))
