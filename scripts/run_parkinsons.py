@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
 # run_parkinsons.py
-# Author: Clemens Tulach & ChatGPT teammate
-# Reproduce the ξ_n vs. baseline experiment on the UCI Parkinson’s Tele-monitoring data set.
-
 import argparse
 import csv
 import os
@@ -237,11 +233,18 @@ def main(args: argparse.Namespace) -> None:
     if args.use_xi:
         criterion = XiLoss(tau=args.tau, lambda_=args.lambda_coef)
     else:
-        mse = nn.MSELoss()
+        # ------- Baseline (no ξₙ) -------
+        mse_loss = nn.MSELoss()
 
         class _Wrap(nn.Module):
+            """MSE-only loss wrapper that mimics XiLoss’ interface."""
+            def __init__(self) -> None:
+                super().__init__()
+                self.task_loss = mse_loss  # <-- expose for run_epoch
+
             def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor):
-                return mse(y_pred, y_true), torch.tensor(0.0, device=y_pred.device)
+                # return (total_loss, xi_soft) exactly like XiLoss
+                return self.task_loss(y_pred, y_true), torch.tensor(0.0, device=y_pred.device)
 
         criterion = _Wrap()
 
@@ -255,7 +258,7 @@ def main(args: argparse.Namespace) -> None:
     make_outdir(checkpoints_dir)
 
     # ---------- Training loop with progress ----------
-    for epoch in _tqdm(range(1, args.epochs + 1), desc="Epochs"):
+    for epoch in tqdm(range(1, args.epochs + 1), desc="Epochs"):
         # λ schedule
         if args.use_xi and epoch <= args.warmup_epochs:
             criterion.lambda_ = 0.0
@@ -287,7 +290,7 @@ def main(args: argparse.Namespace) -> None:
 
         # print every 10 epochs (tqdm bar stays visible)
         if epoch % 10 == 0 or epoch == args.epochs:
-            _tqdm.write(
+            tqdm.write(
                 f"Epoch {epoch:03d}/{args.epochs} | "
                 f"Val MSE {val_mse:.4f} | Val xi {val_xi:.4f}"
             )

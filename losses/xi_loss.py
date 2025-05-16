@@ -1,3 +1,4 @@
+#xi_loss.py
 import torch
 import torch.nn as nn
 import torchsort
@@ -39,7 +40,7 @@ class XiLoss(nn.Module):
         if self.epsilon > 0.0:
             noise = ((torch.rand_like(y_pred_ord) - 0.5) * self.epsilon).detach()
             y_pred_ord = y_pred_ord + noise   # KEEP AUTOGRAD PATH
-            
+
 # -----------------------------------------------
 
 
