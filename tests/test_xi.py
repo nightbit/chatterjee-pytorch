@@ -150,3 +150,13 @@ def test_soft_matches_hard_on_perfect():
     hard = xi_hard(x, y)
     _, soft = XiLoss(tau=0.01, lambda_=1.0)(x, y)
     assert torch.isclose(soft, hard, atol=1e-3), f"{soft} vs {hard}"
+
+def test_xi_gradients_without_task_loss():
+    n = 64
+    y_pred = torch.randn(n, requires_grad=True)
+    y_true = torch.sin(torch.linspace(-3, 3, n))  # any non-constant target
+
+    loss_fn = XiLoss(tau=0.2, lambda_=1.0, task_loss_fn=lambda a, b: 0.0)
+    total, xi_soft = loss_fn(y_pred, y_true)
+    total.backward()
+    assert y_pred.grad.norm() > 1e-4, "ξₙ contributes no gradient!"

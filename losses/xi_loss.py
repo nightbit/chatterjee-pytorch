@@ -37,8 +37,9 @@ class XiLoss(nn.Module):
 
         # ----- minimal tie-breaking for y_pred_ord -----
         if self.epsilon > 0.0:
-            with torch.no_grad():
-                y_pred_ord = y_pred_ord + (torch.rand_like(y_pred_ord) - 0.5) * self.epsilon
+            noise = ((torch.rand_like(y_pred_ord) - 0.5) * self.epsilon).detach()
+            y_pred_ord = y_pred_ord + noise   # KEEP AUTOGRAD PATH
+            
 # -----------------------------------------------
 
 
