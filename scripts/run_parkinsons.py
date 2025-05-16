@@ -10,6 +10,7 @@ import random
 import sys
 from datetime import datetime
 from pathlib import Path
+from tqdm import tqdm
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,8 +21,12 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 # ---------- Local import ----------
-sys.path.append(str(Path(__file__).resolve().parent.parent))  # add project root
-from xi_loss import XiLoss, xi_hard  # noqa: E402 pylint: disable=wrong-import-position
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from losses.xi_loss import XiLoss, xi_hard
+
 
 # ------------------------------ Utils ------------------------------
 
@@ -140,7 +145,8 @@ def run_epoch(
     running_xi = 0.0
     count = 0
 
-    for X, y in dataloader:
+    mode = "Train" if optimizer is not None else "Eval"
+    for X, y in tqdm(dataloader, desc=mode, leave=False):
         X = X.to(device)
         y = y.to(device)
 
@@ -248,27 +254,28 @@ def main(args: argparse.Namespace) -> None:
     checkpoints_dir = Path(args.outdir) / "checkpoints"
     make_outdir(checkpoints_dir)
 
-    for epoch in range(1, args.epochs + 1):
+    # ---------- Training loop with progress ----------
+    for epoch in _tqdm(range(1, args.epochs + 1), desc="Epochs"):
         # λ schedule
         if args.use_xi and epoch <= args.warmup_epochs:
             criterion.lambda_ = 0.0
         elif args.use_xi:
             criterion.lambda_ = args.lambda_coef
 
-        # ---------- Train ----------
+        # Train
         model.train()
         tr_total, tr_mse, tr_xi = run_epoch(
             model, train_loader, criterion, device, optimizer
         )
 
-        # ---------- Validate ----------
+        # Validate
         model.eval()
         with torch.no_grad():
             val_total, val_mse, val_xi = run_epoch(
                 model, val_loader, criterion, device
             )
 
-        # ---------- Logging ----------
+        # Logging
         history["train_mse"].append(tr_mse)
         history["train_xi"].append(tr_xi)
         history["val_mse"].append(val_mse)
@@ -278,11 +285,13 @@ def main(args: argparse.Namespace) -> None:
             best_val_mse = val_mse
             torch.save(model.state_dict(), checkpoints_dir / "best.pt")
 
+        # print every 10 epochs (tqdm bar stays visible)
         if epoch % 10 == 0 or epoch == args.epochs:
-            print(
+            _tqdm.write(
                 f"Epoch {epoch:03d}/{args.epochs} | "
                 f"Val MSE {val_mse:.4f} | Val xi {val_xi:.4f}"
             )
+
 
 
     # Reload best
