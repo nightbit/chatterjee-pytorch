@@ -14,7 +14,9 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LinearRegression
 from torch.utils.data import DataLoader, Dataset, TensorDataset
+from sklearn.model_selection import train_test_split
 
 # ---------- Local import ----------
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -222,7 +224,14 @@ def main(args: argparse.Namespace) -> None:
     data_csv = Path(args.data_dir) / "parkinsons_tele.csv"
     df = load_parkinsons(data_csv)
 
-    train_df, val_df, test_df = split_by_subject(df, 0.8, 0.1, args.seed)
+    # shuffle before split for safety
+    df_shuffled = df.sample(frac=1.0, random_state=args.seed).reset_index(drop=True)
+    train_df, temp_df = train_test_split(
+        df_shuffled, test_size=0.2, random_state=args.seed
+    )
+    val_df,   test_df = train_test_split(
+        temp_df, test_size=0.5, random_state=args.seed
+    )
 
     train_loader, val_loader, test_loader, scaler = prepare_tensors(train_df, val_df, test_df, args.target)
 
@@ -302,9 +311,41 @@ def main(args: argparse.Namespace) -> None:
 
     # ---------- Test ----------
     preds, truths, hard_xi = evaluate_hard_xi(model, test_loader, device)
-    mse_test = np.mean((preds - truths) ** 2)
-    mae_test = np.mean(np.abs(preds - truths))
-    r2_test = 1.0 - mse_test / np.var(truths, ddof=0)
+
+    # --- save raw predictions for later inspection ---
+    np.save(Path(args.outdir) / "preds.npy", preds)
+    np.save(Path(args.outdir) / "truths.npy", truths)
+
+    # ---------- Linear calibration on *validation* set ----------
+    @torch.no_grad()
+    def _collect_preds(loader):
+        out, y = [], []
+        for X, yt in loader:
+            out.append(model(X.to(device)).cpu().numpy())
+            y.append(yt.numpy())
+        return np.concatenate(out).flatten(), np.concatenate(y).flatten()
+
+    val_preds, val_truths = _collect_preds(val_loader)
+
+    cal = LinearRegression().fit(val_preds.reshape(-1, 1), val_truths)
+    a, b = float(cal.coef_[0]), float(cal.intercept_)
+
+    # apply to test set
+    preds_cal = a * preds + b
+    mse_test  = np.mean((preds_cal - truths) ** 2)
+    mae_test  = np.mean(np.abs(preds_cal - truths))
+    r2_test   = 1.0 - mse_test / np.var(truths, ddof=0)
+
+    print(f"[CAL] a={a:.3f}  b={b:.3f} | MSE_cal={mse_test:.2f} | R2_cal={r2_test:.3f}")
+    # note: hard_xi unchanged (rank-invariant)
+
+    # (optional) dump calibration params
+    with open(Path(args.outdir) / "calibration.txt", "w") as f:
+        f.write(f"a {a:.6f}\nb {b:.6f}\n")
+
+    # --- NEW: save raw arrays for later diagnostics ---
+    np.save(Path(args.outdir) / "preds.npy",  preds)
+    np.save(Path(args.outdir) / "truths.npy", truths)
 
     # ---------- Output ----------
     make_outdir(Path(args.outdir))
