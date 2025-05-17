@@ -5,6 +5,7 @@ data/*
 models/*
 results/*
 outputs/*
+runs/*
 !data/.gitkeep
 !models/.gitkeep
 *.DS_Store
