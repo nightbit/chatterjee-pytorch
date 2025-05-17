@@ -9,3 +9,4 @@ runs/*
 !data/.gitkeep
 !models/.gitkeep
 *.DS_Store
+debug.py
