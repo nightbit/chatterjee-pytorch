@@ -337,6 +337,16 @@ def main(args: argparse.Namespace) -> None:
             writer.writerow(header)
         writer.writerow(row)
 
+    # ---- write per-epoch history (add at the very end of main()) ----
+    hist_df = pd.DataFrame({
+        'epoch': np.arange(1, args.epochs + 1),
+        'train_mse': history['train_mse'],
+        'train_xi':  history['train_xi'],
+        'val_mse':   history['val_mse'],
+        'val_xi':    history['val_xi'],
+    })
+    hist_df.to_csv(Path(args.outdir) / 'history.csv', index=False)
+
     # Save learning curves
     plot_learning_curves(history, Path(args.outdir) / "learning_curves.png")
     # Scatter
