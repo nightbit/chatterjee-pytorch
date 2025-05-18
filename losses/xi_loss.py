@@ -1,96 +1,120 @@
-#xi_loss.py
 import torch
 import torch.nn as nn
 import torchsort
-_TIE_EPS = 1e-6  # magnitude of the random jitter used to break exact ties
+
+_TIE_EPS = 1e-6  # magnitude of random jitter for tie-breaking
+
+
+def _softsort_matrix(x: torch.Tensor, tau: float, descending: bool = False) -> torch.Tensor:
+    """Return the SoftSort permutation matrix P_tau(x).
+
+    Args
+    ----
+    x : 1-D tensor (length n) – the vector to be “sorted”.
+    tau : float > 0 – temperature of the relaxation.
+    descending : if True, largest values go to position 0.
+
+    Returns
+    -------
+    P : (n, n) row-stochastic matrix; row i gives the soft
+        assignment of element x[i] to sorted positions.
+    """
+    sorted_x, _ = torch.sort(x, descending=descending)
+    pairwise = -torch.abs(x.unsqueeze(-1) - sorted_x.unsqueeze(0))
+    return torch.softmax(pairwise / tau, dim=-1)
+
 
 class XiLoss(nn.Module):
-    def __init__(self, tau: float = 0.1, lambda_: float = 1.0,
-                 task_loss_fn: nn.Module | None = None,
-                 epsilon: float = _TIE_EPS):          # NEW
+    """Differentiable approximation of Chatterjee’s xi_n(pred, true).
+
+    We compute xi_n(X = y_pred, Y = y_true).  Both the permutation that
+    sorts X and the ranks of Y after that permutation are relaxed with
+    SoftSort / SoftRank, yielding an end-to-end differentiable loss.
+    """
+
+    def __init__(
+        self,
+        tau: float = 0.1,
+        lambda_: float = 1.0,
+        task_loss_fn: nn.Module | None = None,
+        epsilon: float = _TIE_EPS,
+    ) -> None:
         super().__init__()
         self.tau = float(tau)
         self.lambda_ = float(lambda_)
-        self.epsilon = float(epsilon)                # NEW
+        self.epsilon = float(epsilon)
         self.task_loss = task_loss_fn or nn.MSELoss()
 
+    # --------------------------------------------------------------------- #
+    # forward                                                               #
+    # --------------------------------------------------------------------- #
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor):
         if y_pred.shape != y_true.shape:
             raise ValueError("y_pred and y_true must have identical shape.")
         if y_true.numel() < 2:
-            raise ValueError("Xi requires at least 2 samples.")
+            raise ValueError("xi requires at least two samples.")
         if torch.allclose(y_true, y_true[0]):
-            raise ValueError("y_true is constant — ξₙ undefined.")
+            raise ValueError("y_true is constant; xi_n undefined.")
 
         # flatten to 1-D
         y_pred = y_pred.reshape(-1)
         y_true = y_true.reshape(-1)
         n = y_true.numel()
 
-        # ----- minimal tie-breaking for y_true -----
+        # ---- tie-breaking jitter ----------------------------------------
         if self.epsilon > 0.0:
-            with torch.no_grad():  # keep jitter out of autograd graph
+            with torch.no_grad():
                 y_true = y_true + (torch.rand_like(y_true) - 0.5) * self.epsilon
+            noise_pred = ((torch.rand_like(y_pred) - 0.5) * self.epsilon).detach()
+            y_pred = y_pred + noise_pred
 
-        # argsort by y_true (no grad needed)
-        perm = torch.argsort(y_true, dim=0)
-        y_pred_ord = y_pred[perm]
+        # ---- soft permutation induced by y_pred -------------------------
+        P = _softsort_matrix(y_pred, tau=self.tau, descending=False)  # (n, n)
 
-        # ----- minimal tie-breaking for y_pred_ord -----
-        if self.epsilon > 0.0:
-            noise = ((torch.rand_like(y_pred_ord) - 0.5) * self.epsilon).detach()
-            y_pred_ord = y_pred_ord + noise   # KEEP AUTOGRAD PATH
-
-# -----------------------------------------------
-
-
-        # exact ranks (hard) for forward pass
-        hard_ranks = torch.argsort(torch.argsort(y_pred_ord, dim=0), dim=0)
-        hard_ranks = hard_ranks.to(y_pred_ord.dtype) + 1.0
-
-        # soft ranks (differentiable proxy) for backward pass
-        soft_ranks = torchsort.soft_rank(
-            y_pred_ord.unsqueeze(0),
+        # ---- soft ranks of y_true ---------------------------------------
+        soft_ranks_true = torchsort.soft_rank(
+            y_true.unsqueeze(0),
             regularization="l2",
             regularization_strength=self.tau,
-        ).squeeze(0)
+        ).squeeze(0)                                                   # (n,)
 
-        # straight-through combination:
-        #   forward uses hard_ranks, backward uses soft_ranks
-        ranks = hard_ranks + (soft_ranks - soft_ranks.detach())
+        # reorder ranks using transpose(P)
+        ranks_ord = P.t().matmul(soft_ranks_true)                      # (n,)
 
-        # compute ξₙ
-        diffs = torch.abs(ranks[1:] - ranks[:-1]).sum()
+        # ---- xi_n (soft) -------------------------------------------------
+        diffs = torch.abs(ranks_ord[1:] - ranks_ord[:-1]).sum()
         xi_soft = 1.0 - 3.0 * diffs / (n ** 2 - 1)
 
-        # total loss (maximize ξₙ ⇒ subtract)
+        # ---- overall objective ------------------------------------------
         task = self.task_loss(y_pred, y_true)
         total = task - self.lambda_ * xi_soft
         return total, xi_soft
 
 
-def xi_hard(x: torch.Tensor, y: torch.Tensor, epsilon: float = _TIE_EPS):
+# ------------------------------------------------------------------------- #
+# Reference (hard) implementation for evaluation / debugging               #
+# ------------------------------------------------------------------------- #
+def xi_hard(x: torch.Tensor, y: torch.Tensor, epsilon: float = _TIE_EPS) -> torch.Tensor:
+    """Non-differentiable xi_n(x, y) that orders by x and ranks y."""
     if x.shape != y.shape:
         raise ValueError("Shapes differ.")
     n = x.numel()
-    if epsilon > 0.0:
-        with torch.no_grad():
-            y = y + (torch.rand_like(y) - 0.5) * epsilon
     if n < 2:
-        raise ValueError("Need at least 2 samples.")
+        raise ValueError("Need at least two samples.")
     if torch.allclose(y, y[0]):
         raise ValueError("y is constant.")
 
-    # reorder by x
-    idx = torch.argsort(x, dim=0)
+    if epsilon > 0.0:
+        with torch.no_grad():
+            y = y + (torch.rand_like(y) - 0.5) * epsilon
+
+    idx = torch.argsort(x, dim=0)          # hard permutation by x
     y_ord = y[idx]
+
     if epsilon > 0.0:
         with torch.no_grad():
             y_ord = y_ord + (torch.rand_like(y_ord) - 0.5) * epsilon
 
-    # hard ranks of y_ord (0-based → +1 for 1-based)
-    ranks = torch.argsort(torch.argsort(y_ord, dim=0), dim=0)
-    ranks = ranks.to(dtype=torch.float64) + 1.0
-
+    ranks = torch.argsort(torch.argsort(y_ord, dim=0), dim=0).to(torch.float64) + 1.0
     xi = 1.0 - 3.0 * torch.abs(ranks[1:] - ranks[:-1]).sum() / (n ** 2 - 1)
     return xi.to(dtype=x.dtype)
