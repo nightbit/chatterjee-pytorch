@@ -176,14 +176,14 @@ for seed in SEEDS:
     # baseline first
     rows.append(run_one_parkinsons(seed, False, 0.0, 0.0))
     total_runs_done += 1
-    print(f"run {total_runs_done} completed, {total_runs_expected - total_runs_done} remaining")
+    print(f"run {total_runs_done} completed, {total_runs_expected - total_runs_done} remaining. Estimated Time Remaining in Minutes: {((total_runs_expected - total_runs_done) * 3 ) / 60}")
 
     # xi variants
     for lam in LAMBDA_SET:
         for tau in TAU_SET:
             rows.append(run_one_parkinsons(seed, True, lam, tau))
             total_runs_done += 1
-            print(f"run {total_runs_done} completed, {total_runs_expected - total_runs_done} remaining")
+            print(f"run {total_runs_done} completed, {total_runs_expected - total_runs_done} remaining. Estimated Time Remaining in Minutes: {((total_runs_expected - total_runs_done) * 3 ) / 60}")
 
 
 log.info("Parkinson runs completed – total %d models", total_runs_done)
