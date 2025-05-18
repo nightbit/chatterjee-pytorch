@@ -180,9 +180,13 @@ def evaluate_hard_xi(model: nn.Module, loader: DataLoader, device: torch.device)
         truths.append(y.numpy())
     preds = np.concatenate(preds, axis=0).flatten()
     truths = np.concatenate(truths, axis=0).flatten()
-    xi = xi_hard(torch.from_numpy(truths), torch.from_numpy(preds)).item()
-    return preds, truths, xi
+    #xi = xi_hard(torch.from_numpy(truths), torch.from_numpy(preds)).item()
+    #old
 
+    #new
+    xi = xi_hard(torch.from_numpy(preds), torch.from_numpy(truths)).item()
+
+    return preds, truths, xi
 
 # ------------------------------ Plotting ------------------------------
 
