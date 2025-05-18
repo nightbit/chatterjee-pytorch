@@ -51,3 +51,9 @@ import scipy.stats as st
 t, p = st.ttest_rel(xi[(xi.lambda_coef==best[1]) & (xi.tau==best[2])].sort_values("seed").test_hard_xi,
                     base.test_hard_xi)
 print(f'paired t {t:.3f},  p = {p:.4g}')
+
+df  = pd.read_csv(csv_path)
+base = df[df.use_xi==0].sort_values('seed')
+best = df[(df.use_xi==1)&(df.lambda_coef==0.5)&(df.tau==0.2)].sort_values('seed')
+t,p = st.ttest_rel(best.test_mse, base.test_mse)
+print(f'MSE delta {best.test_mse.mean()-base.test_mse.mean():.4f}, t={t:.2f}, p={p:.3f}')
