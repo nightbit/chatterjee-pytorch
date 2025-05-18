@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#execute_parkinsons.py
 """
 End‑to‑end executor for all Parkinson ξₙ experiments, synthetic study,
 timing benchmark, aggregation, statistics, and figure generation.
