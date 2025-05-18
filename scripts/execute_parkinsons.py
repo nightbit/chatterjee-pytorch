@@ -166,18 +166,27 @@ def paired_t(baseline: pd.Series, xi: pd.Series) -> Dict[str, float]:
 # --------------------------- 2. experiment grid ------------------------------
 
 rows: List[Dict[str, float]] = []
-total_runs = 0
+
+# --- progress bookkeeping ----------------------------------------------------
+total_runs_expected = len(SEEDS) * (1 + len(LAMBDA_SET) * len(TAU_SET))
+total_runs_done = 0
+# -----------------------------------------------------------------------------
+
 for seed in SEEDS:
     # baseline first
     rows.append(run_one_parkinsons(seed, False, 0.0, 0.0))
-    total_runs += 1
+    total_runs_done += 1
+    print(f"run {total_runs_done} completed, {total_runs_expected - total_runs_done} remaining")
+
     # xi variants
     for lam in LAMBDA_SET:
         for tau in TAU_SET:
             rows.append(run_one_parkinsons(seed, True, lam, tau))
-            total_runs += 1
+            total_runs_done += 1
+            print(f"run {total_runs_done} completed, {total_runs_expected - total_runs_done} remaining")
 
-log.info("Parkinson runs completed – total %d models", total_runs)
+
+log.info("Parkinson runs completed – total %d models", total_runs_done)
 all_df = pd.DataFrame(rows)
 all_df.to_csv(SESSION_DIR / "all_metrics.csv", index=False)
 
