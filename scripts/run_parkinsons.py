@@ -180,7 +180,9 @@ def plot_learning_curves(history: dict[str, list[float]], out_png: Path) -> None
     epochs = np.arange(1, len(history["val_mse"]) + 1)
     plt.figure(figsize=(8, 4))
     plt.plot(epochs, history["val_mse"], label="Val MSE")
-    plt.plot(epochs, history["val_xi"], label="Val xi_soft")
+    plt.twinx()
+    plt.plot(epochs, history["val_hard_xi"], 'g--', label="Val xi_hard")
+    plt.ylabel("Val ξ_hard")
     plt.xlabel("Epoch")
     plt.legend()
     plt.tight_layout()
@@ -258,10 +260,13 @@ def main(args: argparse.Namespace) -> None:
         with torch.no_grad():
             val_total, val_mse, val_xi = run_epoch(model, val_loader, criterion, device)
 
+        # ---- full-set hard ξ for clear plots ----
+        _, _, val_hard_xi = evaluate_hard_xi(model, val_loader, device)
         history["train_mse"].append(tr_mse)
         history["train_xi"].append(tr_xi)
         history["val_mse"].append(val_mse)
         history["val_xi"].append(val_xi)
+        history.setdefault("val_hard_xi", []).append(val_hard_xi)
 
         if val_mse < best_val_mse:
             best_val_mse = val_mse
