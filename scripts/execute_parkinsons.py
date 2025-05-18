@@ -50,7 +50,7 @@ import run_parkinsons as rp
 
 # ------------------------------- configuration -------------------------------
 
-SEEDS = list(range(20))  # 0 … 9 inclusive
+SEEDS = list(range(10))  # 0 … 9 inclusive
 LAMBDA_SET = [0.125, 0.25, 0.5, 1.0, 2.0, 4.0]
 TAU_SET = [0.01, 0.02, 0.05, 0.1, 0.2, 0.4]
 EPOCHS = 60
