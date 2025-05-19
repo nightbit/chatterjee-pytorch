@@ -214,9 +214,13 @@ def main(args: argparse.Namespace) -> None:
     data_csv = Path(args.data_dir) / "parkinsons_tele.csv"
     df = load_parkinsons(data_csv)
 
-    df_shuffled = df.sample(frac=1.0, random_state=args.seed).reset_index(drop=True)
-    train_df, temp_df = train_test_split(df_shuffled, test_size=0.2, random_state=args.seed)
-    val_df, test_df = train_test_split(temp_df, test_size=0.5, random_state=args.seed)
+    train_df, val_df, test_df = split_by_subject(
+    df,
+    train_ratio=0.80,   # 80 % of subjects → training
+    val_ratio=0.10,     # 10 % of subjects → validation
+    seed=args.seed,
+)
+
 
     train_loader, val_loader, test_loader, _ = prepare_tensors(train_df, val_df, test_df, args.target)
 
