@@ -287,6 +287,17 @@ def main(args: argparse.Namespace) -> None:
     mae_test = np.mean(np.abs(preds - truths))
     r2_test = 1.0 - mse_test / np.var(truths, ddof=0)
 
+    # --- CONSTANT-MEAN BASELINE ------------------------------------
+    # Predict the mean of the true targets for every sample
+    baseline = np.full_like(truths, truths.mean())
+
+    mse_baseline = np.mean((baseline - truths) ** 2)
+    r2_baseline  = 1.0 - mse_baseline / np.var(truths, ddof=0)
+
+    print(f"[BASELINE]  MSE {mse_baseline:.4f} | R2 {r2_baseline:.4f}")
+    print(f"[MODEL   ]  MSE {mse_test:.4f} | R2 {r2_test:.4f}")
+
+
     # Save raw arrays
     make_outdir(Path(args.outdir))
     np.save(Path(args.outdir) / "preds.npy", preds)
