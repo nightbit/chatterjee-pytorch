@@ -206,14 +206,29 @@ all_df.to_csv(SESSION_DIR / "all_metrics.csv", index=False)
 # --------------------------------------------------------------------------- #
 #  2. Statistics: paired t-test                                               #
 # --------------------------------------------------------------------------- #
-best_xi_mask = (all_df.use_xi == 1) & (all_df.lambda_coef == 1.0) & (all_df.tau == 0.1)
-baseline_df = all_df[all_df.use_xi == 0].sort_values("seed")
-xi_df = all_df[best_xi_mask].sort_values("seed")
+best_rows = []
+for seed in SEEDS:
+    # -------- baseline (Xi off) --------
+    base = all_df[(all_df.seed == seed) & (all_df.use_xi == 0)].iloc[0]
+    best_rows.append(
+        {"seed": seed, "variant": "baseline", "test_hard_xi": base.test_hard_xi}
+    )
 
-if not (baseline_df.seed.values == xi_df.seed.values).all():
-    raise RuntimeError("Seed mismatch between baseline and xi models")
+    # -------- Xi models for this seed --------
+    sub = all_df[(all_df.seed == seed) & (all_df.use_xi == 1)]
 
-stats_res = paired_t(baseline_df.test_hard_xi, xi_df.test_hard_xi)
+    # choose the λ,τ with the highest *validation* xi
+    winner = sub.loc[sub.val_xi.idxmax()]
+    best_rows.append(
+        {"seed": seed, "variant": "xi", "test_hard_xi": winner.test_hard_xi}
+    )
+
+best_df = pd.DataFrame(best_rows)
+
+# paired t-test: Xi vs baseline, one row per seed
+xi_scores   = best_df[best_df.variant == "xi"].sort_values("seed").test_hard_xi
+base_scores = best_df[best_df.variant == "baseline"].sort_values("seed").test_hard_xi
+stats_res   = paired_t(base_scores, xi_scores)
 
 stats_path = SESSION_DIR / "stats_summary.txt"
 with stats_path.open("w") as fh:
