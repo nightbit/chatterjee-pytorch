@@ -183,7 +183,7 @@ for seed in SEEDS:
         "run %d completed, %d remaining. est minutes left: %.1f",
         total_runs_done,
         remaining,
-        (remaining * 2) / 60,
+        (remaining * 0.5) / 60,
     )
 
     # Xi variants
@@ -196,7 +196,7 @@ for seed in SEEDS:
                 "run %d completed, %d remaining. est minutes left: %.1f",
                 total_runs_done,
                 remaining,
-                (remaining * 2) / 60,
+                (remaining * 0.5) / 60,
             )
 
 log.info("Diabetes runs completed - total %d models", total_runs_done)
