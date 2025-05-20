@@ -60,7 +60,7 @@ BATCH       = 64
 
 # Friedman-specific parameters
 N_SAMPLES   = 1000                  # total dataset size
-NOISE_STD   = 0.0                   # Gaussian noise sigma
+NOISE_STD   = 1.0                   # Gaussian noise sigma
 
 RUNS_ROOT   = Path("runs")
 
@@ -131,7 +131,7 @@ def run_one_friedman(seed: int, use_xi: bool, lam: float, tau: float) -> Dict[st
         warmup_epochs=WARMUP,
         batch_size=BATCH,
         lr=1e-3,
-        grad_clip=1.0,
+        grad_clip=None,
         cpu=True,
         n_samples=N_SAMPLES,   # NEW arguments for Friedman script
         noise=NOISE_STD,
