@@ -52,7 +52,7 @@ import run_diabetes as rd  # noqa: F401  (kept for completeness)
 #  Configuration                                                              #
 # --------------------------------------------------------------------------- #
 SEEDS = list(range(10))  # 0 … 9 inclusive
-LAMBDA_SET = [0.125, 0.25, 0.5, 1.0, 2.0, 4.0]
+LAMBDA_SET = [5, 15, 30, 45, 60]
 TAU_SET = [0.01, 0.02, 0.05, 0.1, 0.2, 0.4]
 
 EPOCHS = 60
