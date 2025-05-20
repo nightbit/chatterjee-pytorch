@@ -1,4 +1,4 @@
-# run_diabetes.py
+# run_friedman.py
 import argparse
 import csv
 import os
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.datasets import load_diabetes
+from sklearn.datasets import make_friedman1
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
@@ -44,10 +44,23 @@ def make_outdir(path: Path) -> None:
 # ------------------------------ Data ------------------------------
 
 
-def load_diabetes_dataset() -> pd.DataFrame:
-    """Return the diabetes dataset as a DataFrame (features + target)."""
-    # The frame already includes the 'target' column; copy to break linkage.
-    return load_diabetes(as_frame=True).frame.copy()
+def load_friedman1_dataset(
+    n_samples: int,
+    n_features: int,
+    noise: float,
+    random_state: int | None,
+) -> pd.DataFrame:
+    """Return the Friedman #1 synthetic data set as DataFrame (features + target)."""
+    X, y = make_friedman1(
+        n_samples=n_samples,
+        n_features=n_features,
+        noise=noise,
+        random_state=random_state,
+    )
+    col_names = [f"x{i}" for i in range(X.shape[1])]
+    df = pd.DataFrame(X, columns=col_names)
+    df["target"] = y.astype(np.float32)
+    return df
 
 
 def random_split_df(
@@ -74,7 +87,11 @@ def random_split_df(
         random_state=seed,
         shuffle=True,
     )
-    return train_df.reset_index(drop=True), val_df.reset_index(drop=True), test_df.reset_index(drop=True)
+    return (
+        train_df.reset_index(drop=True),
+        val_df.reset_index(drop=True),
+        test_df.reset_index(drop=True),
+    )
 
 
 def prepare_tensors(
@@ -218,8 +235,13 @@ def main(args: argparse.Namespace) -> None:
     print(f"[{datetime.now().isoformat(timespec='seconds')}] Using device: {device}")
 
     # ---------- Data ----------
-    df = load_diabetes_dataset()
-    train_df, val_df, test_df = random_split_df(df, 0.80, 0.10, 9)#seed=args.seed)
+    df = load_friedman1_dataset(
+        n_samples=args.n_samples,
+        n_features=10,
+        noise=args.noise,
+        random_state=args.seed,
+    )
+    train_df, val_df, test_df = random_split_df(df, 0.80, 0.10, 9) #seed
 
     train_loader, val_loader, test_loader, _ = prepare_tensors(
         train_df, val_df, test_df, batch_size=args.batch_size
@@ -359,7 +381,7 @@ def main(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run Diabetes regression experiment")
+    p = argparse.ArgumentParser(description="Run Friedman #1 regression experiment")
     p.add_argument("--outdir", type=str, required=True, help="Directory to write outputs")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--use_xi", action="store_true", help="Enable Xi regularizer")
@@ -371,6 +393,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--grad_clip", type=float, default=1.0)
     p.add_argument("--cpu", action="store_true", help="Force CPU even if CUDA is available")
+    p.add_argument("--n_samples", type=int, default=100, help="Total samples for Friedman #1")
+    p.add_argument("--noise", type=float, default=0.0, help="Gaussian noise STD in Friedman #1")
     return p.parse_args()
 
 
