@@ -24,7 +24,8 @@ repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
-from losses.xi_loss import XiLoss, xi_hard  # noqa: E402  (local module)
+from losses.xi_loss import XiLoss, xi_hard  # noqa: E402
+
 
 # ------------------------------ Utils ------------------------------
 
@@ -44,12 +45,9 @@ def make_outdir(path: Path) -> None:
 
 
 def load_diabetes_dataset() -> pd.DataFrame:
-    """Return the diabetes dataset as a single pandas DataFrame.
-
-    The target column is named 'target'.
-    """
-    diab = load_diabetes(as_frame=True)
-    return pd.concat([diab.frame, diab.target.rename("target")], axis=1)
+    """Return the diabetes dataset as a DataFrame (features + target)."""
+    # The frame already includes the 'target' column; copy to break linkage.
+    return load_diabetes(as_frame=True).frame.copy()
 
 
 def random_split_df(
@@ -58,21 +56,17 @@ def random_split_df(
     val_ratio: float,
     seed: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Three-way random split with reproducibility.
-
-    test_ratio = 1 − train_ratio − val_ratio
-    """
+    """Three-way random split with reproducibility."""
     assert 0 < train_ratio < 1 and 0 < val_ratio < 1, "Ratios must be between 0 and 1"
     assert train_ratio + val_ratio < 1, "Ratios must sum to < 1"
 
-    # First: train+val vs. test
     train_val_df, test_df = train_test_split(
         df,
         test_size=1.0 - (train_ratio + val_ratio),
         random_state=seed,
         shuffle=True,
     )
-    # Second: train vs. val
+
     rel_val_ratio = val_ratio / (train_ratio + val_ratio)
     train_df, val_df = train_test_split(
         train_val_df,
@@ -136,11 +130,13 @@ def run_epoch(
     criterion: nn.Module,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None = None,
+    grad_clip: float | None = None,
 ) -> Tuple[float, float, float]:
+    """Run one epoch of train or eval and return (total, mse, xi)."""
     running_total = running_mse = running_xi = 0.0
     count = 0
-
     mode = "Train" if optimizer else "Eval"
+
     for X, y in tqdm(dataloader, desc=mode, leave=False):
         X, y = X.to(device), y.to(device)
 
@@ -153,7 +149,8 @@ def run_epoch(
 
         if optimizer:
             total.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            if grad_clip is not None:
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
         batch = y.size(0)
@@ -220,18 +217,10 @@ def main(args: argparse.Namespace) -> None:
     device = torch.device("cpu") if args.cpu or not torch.cuda.is_available() else torch.device("cuda")
     print(f"[{datetime.now().isoformat(timespec='seconds')}] Using device: {device}")
 
-    # ---------- Load data ----------
+    # ---------- Data ----------
     df = load_diabetes_dataset()
+    train_df, val_df, test_df = random_split_df(df, 0.80, 0.10, seed=args.seed)
 
-    # ---------- Split ----------
-    train_df, val_df, test_df = random_split_df(
-        df,
-        train_ratio=0.80,   # 80 percent training
-        val_ratio=0.10,     # 10 percent validation
-        seed=args.seed,
-    )
-
-    # ---------- Prepare tensors ----------
     train_loader, val_loader, test_loader, _ = prepare_tensors(
         train_df, val_df, test_df, batch_size=args.batch_size
     )
@@ -270,13 +259,16 @@ def main(args: argparse.Namespace) -> None:
             criterion.lambda_ = args.lambda_coef
 
         model.train()
-        tr_total, tr_mse, tr_xi = run_epoch(model, train_loader, criterion, device, optimizer)
+        tr_total, tr_mse, tr_xi = run_epoch(
+            model, train_loader, criterion, device, optimizer, grad_clip=args.grad_clip
+        )
 
         model.eval()
         with torch.no_grad():
-            val_total, val_mse, val_xi = run_epoch(model, val_loader, criterion, device)
+            val_total, val_mse, val_xi = run_epoch(
+                model, val_loader, criterion, device, optimizer=None
+            )
 
-        # ---- hard xi for plotting ----
         _, _, val_hard_xi = evaluate_hard_xi(model, val_loader, device)
         history["train_mse"].append(tr_mse)
         history["train_xi"].append(tr_xi)
@@ -299,7 +291,6 @@ def main(args: argparse.Namespace) -> None:
     mae_test = np.mean(np.abs(preds - truths))
     r2_test = 1.0 - mse_test / np.var(truths, ddof=0)
 
-    # --- Baseline: mean predictor ---
     baseline = np.full_like(truths, truths.mean())
     mse_baseline = np.mean((baseline - truths) ** 2)
     r2_baseline = 1.0 - mse_baseline / np.var(truths, ddof=0)
@@ -312,7 +303,7 @@ def main(args: argparse.Namespace) -> None:
     np.save(Path(args.outdir) / "preds.npy", preds)
     np.save(Path(args.outdir) / "truths.npy", truths)
 
-    # ---------- Output & logging ----------
+    # ---------- Logging ----------
     summary_csv = Path(args.outdir) / "metrics_summary.csv"
     header = [
         "seed",
@@ -364,9 +355,7 @@ def main(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Run Diabetes regression experiment (optionally with Xi regularizer)"
-    )
+    p = argparse.ArgumentParser(description="Run Diabetes regression experiment")
     p.add_argument("--outdir", type=str, required=True, help="Directory to write outputs")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--use_xi", action="store_true", help="Enable Xi regularizer")
