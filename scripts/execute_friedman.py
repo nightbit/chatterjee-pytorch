@@ -1,13 +1,13 @@
-#execute_diabetes.py
+#!/usr/bin/env python
 """
-End-to-end executor for diabetes experiments using the optional Xi regularizer.
+End-to-end executor for Friedman #1 regression experiments (optionally with Xi regularizer).
 
 Outputs are written to
-    runs/YYYYMMDD_HHMMSS_diabetes_exec/
+    runs/YYYYMMDD_HHMMSS_friedman_exec/
 and include:
-    all_metrics.csv      - 1 row per trained model
+    all_metrics.csv      - one row per trained model
     synth_metrics.csv    - synthetic noise sweep
-    timing_bench.csv     - overhead numbers
+    timing_bench.csv     - Xi overhead numbers
     stats_summary.txt    - paired t-test result
     figures/*.png        - heat map, scatter plots, learning curves, timing
     session.log          - full console log
@@ -26,7 +26,7 @@ from typing import Dict, List
 
 import matplotlib
 
-matplotlib.use("Agg")  # headless
+matplotlib.use("Agg")  # headless back-end
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -42,33 +42,36 @@ RED   = "\033[91m"
 RESET = "\033[0m"
 
 # --------------------------------------------------------------------------- #
-#  Local imports (assumes run_diabetes.py sits next to this script)           #
+#  Local imports (assumes run_friedman.py sits next to this script)           #
 # --------------------------------------------------------------------------- #
 sys.path.insert(0, str(Path(__file__).parent))
-from run_diabetes import main as run_diabetes_main  # type: ignore
-import run_diabetes as rd  # noqa: F401  (kept for completeness)
+from run_friedman import main as run_friedman_main  # type: ignore
 
 # --------------------------------------------------------------------------- #
 #  Configuration                                                              #
 # --------------------------------------------------------------------------- #
-SEEDS = list(range(10))  # 0 … 9 inclusive
-LAMBDA_SET = [5, 15, 30, 45, 60]
-TAU_SET = [0.01, 0.02, 0.05, 0.1, 0.2, 0.4]
+SEEDS       = list(range(10))        # 0 … 9 inclusive
+LAMBDA_SET  = [5, 15, 30, 45, 60]
+TAU_SET     = [0.01, 0.02, 0.05, 0.1, 0.2, 0.4]
 
-EPOCHS = 60
-WARMUP = 5
-BATCH = 64
+EPOCHS      = 60
+WARMUP      = 5
+BATCH       = 64
 
-RUNS_ROOT = Path("runs")
+# Friedman-specific parameters
+N_SAMPLES   = 1000                  # total dataset size
+NOISE_STD   = 0.0                   # Gaussian noise sigma
+
+RUNS_ROOT   = Path("runs")
 
 # Synthetic correlation sanity study
 SYN_FUNCS = {
-    "linear": lambda x: x,
+    "linear":    lambda x: x,
     "quadratic": lambda x: x * x,
-    "sine": lambda x: np.sin(x),
+    "sine":      lambda x: np.sin(x),
 }
 SYN_SIGMA = [0.01, 0.1, 1.0]
-SYN_N = 1000
+SYN_N     = 1000
 
 # Timing benchmark
 TIMING_STEPS = 100
@@ -76,9 +79,9 @@ TIMING_STEPS = 100
 # --------------------------------------------------------------------------- #
 #  Session directories & logging                                              #
 # --------------------------------------------------------------------------- #
-STAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
-SESSION_DIR = RUNS_ROOT / f"{STAMP}_diabetes_exec"
-FIG_DIR = SESSION_DIR / "figures"
+STAMP        = datetime.now().strftime("%Y%m%d_%H%M%S")
+SESSION_DIR  = RUNS_ROOT / f"{STAMP}_friedman_exec"
+FIG_DIR      = SESSION_DIR / "figures"
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -90,7 +93,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("exec")
 
-log.info("===== Diabetes execution started =====")
+log.info("===== Friedman execution started =====")
 log.info("Outputs will be written to %s", SESSION_DIR.resolve())
 
 # Basic disk-space sanity
@@ -102,7 +105,7 @@ if free_mb < 50:
 # --------------------------------------------------------------------------- #
 #  Helpers                                                                    #
 # --------------------------------------------------------------------------- #
-def run_one_diabetes(seed: int, use_xi: bool, lam: float, tau: float) -> Dict[str, float]:
+def run_one_friedman(seed: int, use_xi: bool, lam: float, tau: float) -> Dict[str, float]:
     """
     Train one model (or reuse cached results) and return its metrics row.
     Hard-fail if performance is clearly wrong, preventing wasted grid time.
@@ -117,7 +120,7 @@ def run_one_diabetes(seed: int, use_xi: bool, lam: float, tau: float) -> Dict[st
             return row
         log.warning("Non-finite values in %s - re-running model.", summary_csv)
 
-    # Build argparse-like namespace expected by run_diabetes.main()
+    # Build argparse-like namespace expected by run_friedman.main()
     args = SimpleNamespace(
         outdir=str(outdir),
         seed=seed,
@@ -130,9 +133,11 @@ def run_one_diabetes(seed: int, use_xi: bool, lam: float, tau: float) -> Dict[st
         lr=1e-3,
         grad_clip=1.0,
         cpu=True,
+        n_samples=N_SAMPLES,   # NEW arguments for Friedman script
+        noise=NOISE_STD,
     )
 
-    run_diabetes_main(args)
+    run_friedman_main(args)
 
     if not summary_csv.exists():
         raise RuntimeError(f"Missing metrics_summary.csv in {outdir}")
@@ -176,7 +181,7 @@ total_runs_done = 0
 
 for seed in SEEDS:
     # Baseline (Xi off) first
-    rows.append(run_one_diabetes(seed, False, 0.0, 0.0))
+    rows.append(run_one_friedman(seed, False, 0.0, 0.0))
     total_runs_done += 1
     remaining = total_runs_expected - total_runs_done
     log.info(
@@ -189,7 +194,7 @@ for seed in SEEDS:
     # Xi variants
     for lam in LAMBDA_SET:
         for tau in TAU_SET:
-            rows.append(run_one_diabetes(seed, True, lam, tau))
+            rows.append(run_one_friedman(seed, True, lam, tau))
             total_runs_done += 1
             remaining = total_runs_expected - total_runs_done
             log.info(
@@ -199,7 +204,7 @@ for seed in SEEDS:
                 (remaining * 0.5) / 60,
             )
 
-log.info("Diabetes runs completed - total %d models", total_runs_done)
+log.info("Friedman runs completed - total %d models", total_runs_done)
 all_df = pd.DataFrame(rows)
 all_df.to_csv(SESSION_DIR / "all_metrics.csv", index=False)
 
@@ -303,7 +308,7 @@ def timing_variant(use_xi: bool) -> float:
 
 
 t_base = timing_variant(False)
-t_xi = timing_variant(True)
+t_xi   = timing_variant(True)
 over_pct = 100.0 * (t_xi - t_base) / t_base
 
 tim_df = pd.DataFrame(
@@ -334,21 +339,22 @@ plt.savefig(FIG_DIR / "heatmap_xi.png", dpi=120)
 plt.close()
 
 # === EXTRA HEATMAPS: MSE and R2
-# We keep baseline (use_xi == 0) so the λ=0, τ=0 cell shows the reference.
 metrics = {
-    "test_mse" : dict(title="Mean Test MSE (lower is better)",
-                      cmap ="viridis_r"),   # reversed so low = bright
-    "test_r2"  : dict(title="Mean Test R2 (higher is better)",
-                      cmap ="viridis"),
+    "test_mse": dict(
+        title="Mean Test MSE (lower is better)",
+        cmap ="viridis_r"),   # reversed so low = bright
+    "test_r2":  dict(
+        title="Mean Test R2 (higher is better)",
+        cmap ="viridis"),
 }
 
 for metric, cfg in metrics.items():
     pivot = (
-        all_df                       # keep every run (baseline included)
+        all_df
         .groupby(["lambda_coef", "tau"])[metric]
         .mean()
-        .unstack()                   # rows = lambda, cols = tau
-        .sort_index()                # nice ordering
+        .unstack()
+        .sort_index()
         .reindex(sorted(all_df.tau.unique(), key=float), axis=1)
     )
 
@@ -366,7 +372,6 @@ for metric, cfg in metrics.items():
     plt.savefig(FIG_DIR / fname, dpi=120)
     plt.close()
     log.info("%s saved", fname)
-
 
 # Synthetic scatter plot
 plt.figure(figsize=(5, 4))
