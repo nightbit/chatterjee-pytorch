@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#execute_friedman.py
 """
 End-to-end executor for Friedman #1 regression experiments (optionally with Xi regularizer).
 
