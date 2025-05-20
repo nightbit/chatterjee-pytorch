@@ -219,7 +219,7 @@ def main(args: argparse.Namespace) -> None:
 
     # ---------- Data ----------
     df = load_diabetes_dataset()
-    train_df, val_df, test_df = random_split_df(df, 0.80, 0.10, 0)#seed=args.seed)
+    train_df, val_df, test_df = random_split_df(df, 0.80, 0.10, 9)#seed=args.seed)
 
     train_loader, val_loader, test_loader, _ = prepare_tensors(
         train_df, val_df, test_df, batch_size=args.batch_size
