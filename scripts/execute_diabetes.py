@@ -318,6 +318,41 @@ plt.tight_layout()
 plt.savefig(FIG_DIR / "heatmap_xi.png", dpi=120)
 plt.close()
 
+# === EXTRA HEATMAPS: MSE and R2
+# We keep baseline (use_xi == 0) so the λ=0, τ=0 cell shows the reference.
+metrics = {
+    "test_mse" : dict(title="Mean Test MSE (lower is better)",
+                      cmap ="viridis_r"),   # reversed so low = bright
+    "test_r2"  : dict(title="Mean Test R2 (higher is better)",
+                      cmap ="viridis"),
+}
+
+for metric, cfg in metrics.items():
+    pivot = (
+        all_df                       # keep every run (baseline included)
+        .groupby(["lambda_coef", "tau"])[metric]
+        .mean()
+        .unstack()                   # rows = lambda, cols = tau
+        .sort_index()                # nice ordering
+        .reindex(sorted(all_df.tau.unique(), key=float), axis=1)
+    )
+
+    plt.figure(figsize=(6, 4))
+    im = plt.imshow(pivot, aspect="auto", origin="lower",
+                    cmap=cfg["cmap"], interpolation="nearest")
+    plt.xticks(range(len(pivot.columns)), pivot.columns)
+    plt.yticks(range(len(pivot.index)), pivot.index)
+    plt.colorbar(im, label=f"mean {metric}")
+    plt.xlabel("tau")
+    plt.ylabel("lambda")
+    plt.title(cfg["title"])
+    plt.tight_layout()
+    fname = f"heatmap_{metric}.png"
+    plt.savefig(FIG_DIR / fname, dpi=120)
+    plt.close()
+    log.info("%s saved", fname)
+
+
 # Synthetic scatter plot
 plt.figure(figsize=(5, 4))
 for label, col in [("Xi", "xi"), ("Spearman", "spearman"), ("Pearson", "pearson")]:
