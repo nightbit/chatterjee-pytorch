@@ -60,7 +60,7 @@ BATCH       = 64
 
 # Friedman-specific parameters
 N_SAMPLES   = 1000                  # total dataset size
-NOISE_STD   = 1.0                   # Gaussian noise sigma
+NOISE_STD   = 3.0                   # Gaussian noise sigma
 
 RUNS_ROOT   = Path("runs")
 
