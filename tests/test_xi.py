@@ -1,6 +1,7 @@
 import pytest
 import torch
-
+import math
+from torch.autograd import gradcheck
 from losses.xi_loss import XiLoss, xi_hard
 
 torch.manual_seed(0)
@@ -106,3 +107,195 @@ def test_xi_gradients_without_task_loss():
     total, xi_soft = loss_fn(y_pred, y_true)
     total.backward()
     assert y_pred.grad.norm() > 1e-4, "ξₙ contributes no gradient!"
+
+def test_independence_null_xi_near_zero():
+    n = 4000
+    x = torch.randn(n)
+    y = torch.randn(n)  # independent
+    xi = xi_hard(x, y).item()
+    assert abs(xi) < 0.03, f"independence should give ~0, got {xi:.4f}"
+
+def test_monotone_transform_invariance():
+    n = 512
+    x = torch.linspace(-2, 3, n)
+    y = torch.sin(x) + 0.1*torch.randn(n)
+    # strictly increasing transforms
+    fx = torch.exp(x/5)         # increasing in x
+    gy = torch.log(y - y.min() + 1.0)  # increasing in y's order
+    base = xi_hard(x, y)
+    x_inc = xi_hard(fx, y)
+    y_inc = xi_hard(x, gy)
+    # joint sign flip should preserve ξ
+    both_flip = xi_hard(-x, -y)
+    for got in [x_inc, y_inc, both_flip]:
+        assert torch.isclose(got, base, atol=1e-3), f"{got} vs {base}"
+
+def test_noise_monotonicity():
+    torch.manual_seed(0)
+    n = 2000
+    x = torch.rand(n)*4 - 2
+    f = torch.tanh(x)  # monotone-ish
+    sigmas = [0.01, 0.1, 0.5]
+    xis = []
+    for s in sigmas:
+        y = f + s*torch.randn(n)
+        xis.append(xi_hard(x, y).item())
+    assert xis[0] > xis[1] > xis[2], f"ξ should drop with noise: {xis}"
+
+def test_pair_order_permutation_invariance():
+    n = 333
+    x = torch.randn(n)
+    y = x**3 + 0.1*torch.randn(n)
+    base = xi_hard(x, y)
+    perm = torch.randperm(n)
+    shuf = xi_hard(x[perm], y[perm])
+    assert torch.isclose(base, shuf, atol=1e-8)
+
+def test_soft_bounds_and_finiteness_across_tau():
+    n = 128
+    yp = torch.randn(n, requires_grad=True)
+    yt = torch.randn(n)
+    for tau in [0.005, 0.01, 0.1, 0.5, 1.0, 2.0]:
+        yp.grad = None
+        loss, xi_soft = XiLoss(tau=tau, lambda_=1.0)(yp, yt)
+        assert torch.isfinite(loss) and torch.isfinite(xi_soft)
+        assert -1e-3 <= xi_soft.item() <= 1+1e-3  # numeric wiggle, should be [0,1]
+        loss.backward()
+        assert torch.isfinite(yp.grad).all()
+
+def test_near_ties_do_not_explode_soft():
+    n = 256
+    base = torch.linspace(-1, 1, n)
+    y = base + 1e-6*torch.randn(n)  # near ties
+    yp = base + 1e-6*torch.randn(n)
+    loss, xi_soft = XiLoss(tau=0.1, lambda_=1.0)(yp.requires_grad_(), y)
+    loss.backward()
+    assert torch.isfinite(xi_soft) and torch.isfinite(yp.grad).all()
+
+def test_shape_equivalence_n_vs_n1():
+    n = 200
+    x = torch.randn(n)
+    y = torch.randn(n)
+    hard_a = xi_hard(x, y)
+    hard_b = xi_hard(x.view(-1,1).squeeze(), y.view(-1,1).squeeze())
+    assert torch.isclose(hard_a, hard_b, atol=1e-12)
+
+#passes if jitter is disabled in xi_loss.py
+def test_gradcheck_soft_xi_scalar_output():
+    torch.manual_seed(0)
+    n = 16
+    yp = (torch.randn(n, dtype=torch.float64, requires_grad=True))
+    yt = torch.randn(n, dtype=torch.float64)  # constant-free
+    loss_fn = XiLoss(tau=0.2, lambda_=1.0)
+    def f(v):
+        total, _ = loss_fn(v, yt)
+        return total
+    assert gradcheck(f, (yp,), eps=1e-6, atol=1e-4, rtol=1e-4)
+
+def test_concatenation_invariance():
+    torch.manual_seed(0)
+    n = 300
+    x = torch.randn(n)
+    y = torch.sin(x) + 0.1*torch.randn(n)
+    whole = xi_hard(x, y)
+    idx = torch.randperm(n)
+    a, b = idx[:150], idx[150:]
+    recon = xi_hard(torch.cat([x[a], x[b]]), torch.cat([y[a], y[b]]))
+    assert torch.isclose(whole, recon, atol=1e-12)
+
+def test_dtype_consistency():
+    torch.manual_seed(0)
+    n = 512
+    x32 = torch.randn(n, dtype=torch.float32)
+    y32 = torch.tanh(x32) + 0.05*torch.randn(n, dtype=torch.float32)
+    x64, y64 = x32.double(), y32.double()
+    h32 = xi_hard(x32, y32).double()
+    h64 = xi_hard(x64, y64)
+    assert torch.isclose(h32, h64, atol=1e-6)
+
+def test_numerical_stability_extremes():
+    torch.manual_seed(0)
+    n = 256
+    x = (1e6*torch.randn(n)).clamp(-1e9, 1e9)
+    y = x + 1e-3*torch.randn(n)
+    loss, xi = XiLoss(tau=0.1, lambda_=1.0)(x.requires_grad_(), y)
+    loss.backward()
+    assert torch.isfinite(xi) and torch.isfinite(x.grad).all()
+
+def test_index_order_irrelevant():
+    n = 401
+    x = torch.randn(n); y = torch.randn(n)
+    base = xi_hard(x, y)
+    perm = torch.randperm(n)
+    assert torch.isclose(base, xi_hard(x[perm], y[perm]), atol=1e-12)
+
+def test_shape_ducktyping_both_axes():
+    n = 200
+    x = torch.randn(n); y = torch.randn(n)
+    a = xi_hard(x, y)
+    b = xi_hard(x.view(-1,1).squeeze(1), y.view(-1,1).squeeze(1))
+    assert torch.isclose(a, b, atol=1e-12)
+
+def test_independence_null_xi_near_zero():
+    n = 4000
+    x = torch.randn(n)
+    y = torch.randn(n)  # independent
+    xi = xi_hard(x, y).item()
+    assert abs(xi) < 0.03, f"independence should give ~0, got {xi:.4f}"
+
+def test_monotone_transform_invariance():
+    n = 512
+    x = torch.linspace(-2, 3, n)
+    y = torch.sin(x) + 0.1*torch.randn(n)
+    # strictly increasing transforms
+    fx = torch.exp(x/5)         # increasing in x
+    gy = torch.log(y - y.min() + 1.0)  # increasing in y's order
+    base = xi_hard(x, y)
+    x_inc = xi_hard(fx, y)
+    y_inc = xi_hard(x, gy)
+    # joint sign flip should preserve ξ
+    both_flip = xi_hard(-x, -y)
+    for got in [x_inc, y_inc, both_flip]:
+        assert torch.isclose(got, base, atol=1e-3), f"{got} vs {base}"
+
+def test_noise_monotonicity():
+    torch.manual_seed(0)
+    n = 2000
+    x = torch.rand(n)*4 - 2
+    f = torch.tanh(x)  # monotone-ish
+    sigmas = [0.01, 0.1, 0.5]
+    xis = []
+    for s in sigmas:
+        y = f + s*torch.randn(n)
+        xis.append(xi_hard(x, y).item())
+    assert xis[0] > xis[1] > xis[2], f"ξ should drop with noise: {xis}"
+
+def test_pair_order_permutation_invariance():
+    n = 333
+    x = torch.randn(n)
+    y = x**3 + 0.1*torch.randn(n)
+    base = xi_hard(x, y)
+    perm = torch.randperm(n)
+    shuf = xi_hard(x[perm], y[perm])
+    assert torch.isclose(base, shuf, atol=1e-8)
+
+def test_soft_bounds_and_finiteness_across_tau():
+    n = 128
+    yp = torch.randn(n, requires_grad=True)
+    yt = torch.randn(n)
+    for tau in [0.005, 0.01, 0.1, 0.5, 1.0, 2.0]:
+        yp.grad = None
+        loss, xi_soft = XiLoss(tau=tau, lambda_=1.0)(yp, yt)
+        assert torch.isfinite(loss) and torch.isfinite(xi_soft)
+        assert -1e-3 <= xi_soft.item() <= 1+1e-3  # numeric wiggle, should be [0,1]
+        loss.backward()
+        assert torch.isfinite(yp.grad).all()
+
+def test_near_ties_do_not_explode_soft():
+    n = 256
+    base = torch.linspace(-1, 1, n)
+    y = base + 1e-6*torch.randn(n)  # near ties
+    yp = base + 1e-6*torch.randn(n)
+    loss, xi_soft = XiLoss(tau=0.1, lambda_=1.0)(yp.requires_grad_(), y)
+    loss.backward()
+    assert torch.isfinite(xi_soft) and torch.isfinite(yp.grad).all()
