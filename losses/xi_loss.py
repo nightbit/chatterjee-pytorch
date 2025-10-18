@@ -72,15 +72,16 @@ class XiLoss(nn.Module):
         # ---- soft permutation induced by y_pred -------------------------
         P = _softsort_matrix(y_pred, tau=self.tau, descending=False)  # (n, n)
 
-        # ---- soft ranks of y_true ---------------------------------------
-        soft_ranks_true = torchsort.soft_rank(
-            y_true.unsqueeze(0),
+        # ---- softly permute y_true into the order of y_pred --------------
+        # columns (positions) aggregate from original indices -> sorted-by-y_pred
+        y_true_ord = P.t().matmul(y_true)  # (n,)
+
+        # ---- soft ranks of the permuted y_true ---------------------------
+        ranks_ord = torchsort.soft_rank(
+            y_true_ord.unsqueeze(0),
             regularization="l2",
             regularization_strength=self.tau,
         ).squeeze(0)                                                   # (n,)
-
-        # reorder ranks using transpose(P)
-        ranks_ord = P.t().matmul(soft_ranks_true)                      # (n,)
 
         # ---- xi_n (soft) -------------------------------------------------
         diffs = torch.abs(ranks_ord[1:] - ranks_ord[:-1]).sum()
