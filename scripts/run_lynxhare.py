@@ -3,6 +3,7 @@ import argparse
 import csv
 import os
 import random
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -60,9 +61,7 @@ def load_lynxhare_dataset(csv_path: Optional[str] = None) -> pd.DataFrame:
     df = pd.read_csv(src)
     # Normalize column names just in case; keep canonical 'Year','Hare','Lynx'
     df.columns = [c.strip().title() for c in df.columns]
-    assert {"Year", "Hare", "Lynx"}.issubset(
-        set(df.columns)
-    ), "CSV must contain Year, Hare, Lynx columns"
+    assert {"Year", "Hare", "Lynx"}.issubset(set(df.columns)), "CSV must contain Year, Hare, Lynx columns"
     df = df.sort_values("Year").reset_index(drop=True)
     return df
 
@@ -93,27 +92,44 @@ def make_supervised_frame_b2(df: pd.DataFrame) -> pd.DataFrame:
     return sup[["Year"] + feat_cols + ["target"]]
 
 
-def chronological_split_df(
-    df: pd.DataFrame, train_ratio: float, val_ratio: float
+def rolling_block_split_df(
+    df: pd.DataFrame,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    roll_id: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Deterministic chronological split (80/10/10-style) preserving order.
-    Assumes `df` is already sorted by time ascending.
+    Deterministic, chronological, contiguous **rolling/blocked** split.
+
+    Sizes are computed via floor() for each partition, which typically leaves a
+    small slack. The start index is chosen by roll_id modulo (slack+1), so seeds
+    induce multiple overlapping test sets across repeats (NB test applicability).
+
+    Layout per split: [TRAIN][VAL][TEST], contiguous, time-ordered.
     """
-    assert 0 < train_ratio < 1 and 0 < val_ratio < 1, "Ratios must be between 0 and 1"
-    assert train_ratio + val_ratio < 1, "Ratios must sum to < 1"
+    assert 0 < train_ratio < 1 and 0 < val_ratio < 1 and 0 < test_ratio < 1, "Ratios must be in (0,1)"
+    assert train_ratio + val_ratio + test_ratio <= 1.0 + 1e-9, "Ratios must sum to <= 1"
 
     n = len(df)
     n_train = int(np.floor(train_ratio * n))
     n_val = int(np.floor(val_ratio * n))
-    n_test = n - n_train - n_val
+    n_test = int(np.floor(test_ratio * n))
+    total = n_train + n_val + n_test
+    assert n_train > 0 and n_val > 0 and n_test > 0, "Empty partition from tiny dataset/ratios"
 
-    train_df = df.iloc[:n_train].reset_index(drop=True)
-    val_df = df.iloc[n_train : n_train + n_val].reset_index(drop=True)
-    test_df = df.iloc[n_train + n_val :].reset_index(drop=True)
+    slack = max(n - total, 0)
+    start = int(roll_id % (slack + 1))  # 0 … slack inclusive
 
-    assert len(train_df) + len(val_df) + len(test_df) == n
-    assert len(train_df) > 0 and len(val_df) > 0 and len(test_df) > 0, "Empty split partition detected"
+    i0 = start
+    i1 = i0 + n_train
+    i2 = i1 + n_val
+    i3 = i2 + n_test
+    assert i3 <= n, "Window exceeds data length — check ratios"
+
+    train_df = df.iloc[i0:i1].reset_index(drop=True)
+    val_df = df.iloc[i1:i2].reset_index(drop=True)
+    test_df = df.iloc[i2:i3].reset_index(drop=True)
     return train_df, val_df, test_df
 
 
@@ -176,7 +192,7 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None = None,
     grad_clip: float | None = None,
 ) -> Tuple[float, float, float]:
-    """Run one epoch of train or eval and return (total, mse, xi)."""
+    """Run one epoch of train or eval and return (total, mse, xi_soft)."""
     running_total = running_mse = running_xi = 0.0
     count = 0
     mode = "Train" if optimizer else "Eval"
@@ -223,18 +239,27 @@ def evaluate_hard_xi(
     return preds, truths, xi
 
 
+def compute_test_metrics(preds: np.ndarray, truths: np.ndarray) -> Tuple[float, float, float]:
+    mse = float(np.mean((preds - truths) ** 2))
+    mae = float(np.mean(np.abs(preds - truths)))
+    r2 = float(1.0 - mse / np.var(truths, ddof=0))
+    return mse, mae, r2
+
+
 # ------------------------------ Plotting ------------------------------
 
 
 def plot_learning_curves(history: dict, out_png: Path) -> None:
-    epochs = np.arange(1, len(history.get("val_mse", [])) + 1)
+    epochs = np.arange(1, len(history["val_mse"]) + 1)
     plt.figure(figsize=(8, 4))
-    plt.plot(epochs, history["val_mse"], label="Val MSE")
-    plt.twinx()
-    plt.plot(epochs, history["val_hard_xi"], "g--", label="Val xi_hard")
-    plt.ylabel("Val xi_hard")
-    plt.xlabel("Epoch")
-    plt.legend()
+    ax1 = plt.gca()
+    l1, = ax1.plot(epochs, history["val_mse"], label="Val MSE")
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Val MSE")
+    ax2 = ax1.twinx()
+    l2, = ax2.plot(epochs, history["val_hard_xi"], "g--", label="Val xi_hard")
+    ax2.set_ylabel("Val xi_hard")
+    ax1.legend(handles=[l1, l2], loc="best")
     plt.tight_layout()
     plt.savefig(out_png, dpi=96)
     plt.close()
@@ -243,7 +268,7 @@ def plot_learning_curves(history: dict, out_png: Path) -> None:
 def plot_scatter(truth: np.ndarray, pred: np.ndarray, out_png: Path, title: str) -> None:
     plt.figure(figsize=(4, 4))
     plt.scatter(truth, pred, s=8, alpha=0.6)
-    lims = [min(truth.min(), pred.min()), max(truth.max(), pred.max())]
+    lims = [float(min(truth.min(), pred.min())), float(max(truth.max(), pred.max()))]
     plt.plot(lims, lims, "k--", linewidth=1)
     plt.xlabel("True target (Lynx_{t+1})")
     plt.ylabel("Predicted (Lynx_{t+1})")
@@ -264,8 +289,8 @@ def main(args: argparse.Namespace) -> None:
     # ---------- Data ----------
     raw_df = load_lynxhare_dataset(args.data_csv)
     sup_df = make_supervised_frame_b2(raw_df)
-    # Chronological 80/10/10 split (no shuffling)
-    train_df, val_df, test_df = chronological_split_df(sup_df, 0.80, 0.10)
+    # Repeated blocked/rolling chronological split (time-series safe)
+    train_df, val_df, test_df = rolling_block_split_df(sup_df, 0.80, 0.10, 0.10, roll_id=args.seed)
 
     train_loader, val_loader, test_loader, _ = prepare_tensors(
         train_df, val_df, test_df, batch_size=args.batch_size
@@ -276,7 +301,8 @@ def main(args: argparse.Namespace) -> None:
 
     # ---------- Criterion ----------
     if args.use_xi:
-        criterion = XiLoss(tau=args.tau, lambda_=args.lambda_coef)
+        # warm-up handled in the loop by toggling lambda_
+        criterion = XiLoss(tau=args.tau, lambda_=0.0)
     else:
         mse_loss = nn.MSELoss()
 
@@ -293,94 +319,178 @@ def main(args: argparse.Namespace) -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     history = {"train_mse": [], "train_xi": [], "val_mse": [], "val_xi": [], "val_hard_xi": []}
-    best_val_mse = float("inf")
+
     checkpoints_dir = Path(args.outdir) / "checkpoints"
     make_outdir(checkpoints_dir)
-    make_outdir(Path(args.outdir))
+
+    # ---------- Dual-selection trackers ----------
+    best_val_mse = float("inf")
+    best_val_hard_xi = float("-inf")
+    best_epoch_mse = -1
+    best_epoch_xi_post = -1
+
+    # Track "any-epoch" xi best to warn if it came from warm-up (when xi is enabled)
+    best_val_hard_xi_any = float("-inf")
+    best_epoch_xi_any = -1
+
+    best_mse_path = checkpoints_dir / "best_mse.pt"
+    best_xi_path = checkpoints_dir / "best_xi.pt"
+    alias_best_path = checkpoints_dir / "best.pt"  # alias to best_mse for backward-compat
 
     # ---------- Training ----------
     for epoch in tqdm(range(1, args.epochs + 1), desc="Epochs"):
-        # warmup: disable xi until warmup_epochs
-        if args.use_xi and epoch <= args.warmup_epochs:
-            criterion.lambda_ = 0.0
-        elif args.use_xi:
-            criterion.lambda_ = args.lambda_coef
+        # Warmup: zero-out lambda for the first warmup epochs (only if xi enabled)
+        if hasattr(criterion, "lambda_") and args.use_xi:
+            criterion.lambda_ = 0.0 if epoch <= args.warmup_epochs else args.lambda_coef
 
         model.train()
-        tr_total, tr_mse, tr_xi = run_epoch(
+        tr_total, tr_mse, tr_xi_soft = run_epoch(
             model, train_loader, criterion, device, optimizer, grad_clip=args.grad_clip
         )
 
         model.eval()
         with torch.no_grad():
-            val_total, val_mse, val_xi = run_epoch(
+            val_total, val_mse, val_xi_soft = run_epoch(
                 model, val_loader, criterion, device, optimizer=None
             )
 
+        # Hard xi on validation for selection-by-dependence
         _, _, val_hard_xi = evaluate_hard_xi(model, val_loader, device)
+
         history["train_mse"].append(tr_mse)
-        history["train_xi"].append(tr_xi)
+        history["train_xi"].append(tr_xi_soft)
         history["val_mse"].append(val_mse)
-        history["val_xi"].append(val_xi)
+        history["val_xi"].append(val_xi_soft)
         history["val_hard_xi"].append(val_hard_xi)
 
+        # ---- Selection: best by validation MSE ----
         if val_mse < best_val_mse:
-            best_val_mse = val_mse
-            torch.save(model.state_dict(), checkpoints_dir / "best.pt")
+            best_val_mse = float(val_mse)
+            best_epoch_mse = epoch
+            torch.save(model.state_dict(), best_mse_path)
+            # keep alias aligned
+            shutil.copyfile(best_mse_path, alias_best_path)
+
+        # ---- Selection: best by validation hard xi ----
+        # - If xi regularization is enabled, exclude warm-up epochs (epoch <= warmup)
+        #   from the xi-based selection to avoid picking a "baseline" snapshot.
+        # - Always track the "any-epoch" xi best for diagnostic warning.
+        if val_hard_xi > best_val_hard_xi_any:
+            best_val_hard_xi_any = float(val_hard_xi)
+            best_epoch_xi_any = epoch
+
+        xi_selection_allowed = (not args.use_xi) or (epoch > args.warmup_epochs and getattr(criterion, "lambda_", 0) > 0)
+
+        if xi_selection_allowed and val_hard_xi > best_val_hard_xi:
+            best_val_hard_xi = float(val_hard_xi)
+            best_epoch_xi_post = epoch
+            torch.save(model.state_dict(), best_xi_path)
 
         if epoch % 10 == 0 or epoch == args.epochs:
-            tqdm.write(f"Epoch {epoch:03d}/{args.epochs} | Val MSE {val_mse:.4f} | Val xi {val_xi:.4f}")
+            tqdm.write(
+                f"Epoch {epoch:03d}/{args.epochs} | "
+                f"Val MSE {val_mse:.4f} | "
+                f"Val xi_soft {val_xi_soft:.4f} | "
+                f"Val xi_hard {val_hard_xi:.4f}"
+            )
 
-    # ---------- Test ----------
-    model.load_state_dict(torch.load(checkpoints_dir / "best.pt", map_location=device))
-    preds, truths, hard_xi = evaluate_hard_xi(model, test_loader, device)
+    # If xi was enabled and the best xi overall came from warm-up, warn that we excluded it.
+    if args.use_xi and best_epoch_xi_any != -1 and best_epoch_xi_any <= args.warmup_epochs:
+        print(
+            f"[WARN] Highest validation xi_hard occurs during warm-up epoch {best_epoch_xi_any} "
+            f"(lambda=0). Xi-selected checkpoint uses best post-warm-up epoch {best_epoch_xi_post}."
+        )
 
-    mse_test = np.mean((preds - truths) ** 2)
-    mae_test = np.mean(np.abs(preds - truths))
-    r2_test = 1.0 - mse_test / np.var(truths, ddof=0)
+    # Safety: ensure xi checkpoint exists (in degenerate cases pick mse checkpoint)
+    if not best_xi_path.exists():
+        shutil.copyfile(best_mse_path, best_xi_path)
+        best_val_hard_xi = history["val_hard_xi"][best_epoch_mse - 1] if best_epoch_mse > 0 else float("nan")
+        best_epoch_xi_post = best_epoch_mse
+        print("[INFO] Using MSE-selected checkpoint as xi-selected fallback.")
 
-    baseline = np.full_like(truths, truths.mean())
-    mse_baseline = np.mean((baseline - truths) ** 2)
-    r2_baseline = 1.0 - mse_baseline / np.var(truths, ddof=0)
+    # ---------- Test: evaluate BOTH checkpoints ----------
+    def _eval_checkpoint(ckpt_path: Path) -> Tuple[float, float, float, float]:
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        preds, truths, hard_xi = evaluate_hard_xi(model, test_loader, device)
+        mse, mae, r2 = compute_test_metrics(preds, truths)
+        return mse, mae, r2, hard_xi
 
-    print(f"[BASELINE]  MSE {mse_baseline:.4f} | R2 {r2_baseline:.4f}")
-    print(f"[MODEL   ]  MSE {mse_test:.4f} | R2 {r2_test:.4f}")
+    # RQ2: predictive accuracy — model selected by best validation MSE
+    test_mse_mseSel, test_mae_mseSel, test_r2_mseSel, test_hard_xi_mseSel = _eval_checkpoint(best_mse_path)
+    # RQ3: dependence fidelity — model selected by best validation hard xi
+    test_mse_xiSel, test_mae_xiSel, test_r2_xiSel, test_hard_xi_xiSel = _eval_checkpoint(best_xi_path)
 
-    # ---------- Save raw arrays ----------
-    np.save(Path(args.outdir) / "preds.npy", preds)
-    np.save(Path(args.outdir) / "truths.npy", truths)
+    # Simple constant baseline for context (not used downstream)
+    model.load_state_dict(torch.load(best_mse_path, map_location=device))
+    preds_mseSel, truths_mseSel, _ = evaluate_hard_xi(model, test_loader, device)
+    baseline = np.full_like(truths_mseSel, truths_mseSel.mean())
+    mse_baseline = float(np.mean((baseline - truths_mseSel) ** 2))
+    r2_baseline = float(1.0 - mse_baseline / np.var(truths_mseSel, ddof=0))
+
+    print(f"[BASELINE (const mean)]  MSE {mse_baseline:.4f} | R2 {r2_baseline:.4f}")
+    print(f"[MSE-selected  ]  MSE {test_mse_mseSel:.4f} | R2 {test_r2_mseSel:.4f} | xi_hard {test_hard_xi_mseSel:.4f}")
+    print(f"[XI-selected   ]  MSE {test_mse_xiSel:.4f} | R2 {test_r2_xiSel:.4f} | xi_hard {test_hard_xi_xiSel:.4f}")
+
+    # ---------- Save raw arrays (only for MSE-selected to limit churn) ----------
+    make_outdir(Path(args.outdir))
+    np.save(Path(args.outdir) / "preds.npy", preds_mseSel)
+    np.save(Path(args.outdir) / "truths.npy", truths_mseSel)
 
     # ---------- Logging ----------
     summary_csv = Path(args.outdir) / "metrics_summary.csv"
+
+    # Keep parity with diabetes schema (expanded; single row, overwrite).
     header = [
+        # Identity / config
         "seed",
         "use_xi",
         "lambda_coef",
         "tau",
+        # Legacy epoch-end validation (kept for compatibility)
         "val_mse",
         "val_xi",
-        "test_mse",
-        "test_mae",
-        "test_r2",
-        "test_hard_xi",
+        # Selection summaries (NEW)
+        "best_val_mse",
+        "best_val_hard_xi",
+        # Test metrics for MSE-selected checkpoint (NEW)
+        "test_mse_mseSel",
+        "test_mae_mseSel",
+        "test_r2_mseSel",
+        "test_hard_xi_mseSel",
+        # Test metrics for xi-selected checkpoint (NEW)
+        "test_mse_xiSel",
+        "test_mae_xiSel",
+        "test_r2_xiSel",
+        "test_hard_xi_xiSel",
     ]
+
+    # Last-epoch validation (legacy)
+    last_val_mse = history["val_mse"][-1] if history["val_mse"] else float("nan")
+    last_val_xi_soft = history["val_xi"][-1] if history["val_xi"] else float("nan")
+
     row = [
         args.seed,
         int(args.use_xi),
         args.lambda_coef if args.use_xi else 0.0,
         args.tau if args.use_xi else 0.0,
-        history["val_mse"][-1],
-        history["val_xi"][-1],
-        mse_test,
-        mae_test,
-        r2_test,
-        hard_xi,
+        last_val_mse,
+        last_val_xi_soft,
+        best_val_mse,
+        best_val_hard_xi,
+        test_mse_mseSel,
+        test_mae_mseSel,
+        test_r2_mseSel,
+        test_hard_xi_mseSel,
+        test_mse_xiSel,
+        test_mae_xiSel,
+        test_r2_xiSel,
+        test_hard_xi_xiSel,
     ]
-    write_header = not summary_csv.exists()
-    with summary_csv.open("a", newline="") as f:
+
+    # Overwrite with a single row (no appends).
+    with summary_csv.open("w", newline="") as f:
         writer = csv.writer(f)
-        if write_header:
-            writer.writerow(header)
+        writer.writerow(header)
         writer.writerow(row)
 
     hist_df = pd.DataFrame(
@@ -396,11 +506,11 @@ def main(args: argparse.Namespace) -> None:
     hist_df.to_csv(Path(args.outdir) / "history.csv", index=False)
 
     plot_learning_curves(history, Path(args.outdir) / "learning_curves.png")
-    title = "Xi Model (Lynx_{t+1})" if args.use_xi else "Baseline (Lynx_{t+1})"
-    plot_scatter(truths, preds, Path(args.outdir) / "scatter_pred_vs_true.png", title)
+    # Scatter only for MSE-selected
+    plot_scatter(truths_mseSel, preds_mseSel, Path(args.outdir) / "scatter_pred_vs_true.png", "MSE-selected")
 
-    print(f"[DONE] Test MSE {mse_test:.4f} | Hard xi {hard_xi:.4f}")
-    print(f"Samples: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
+    print(f"[DONE] MSE-selected Test MSE {test_mse_mseSel:.4f} | xi_hard {test_hard_xi_mseSel:.4f}")
+    print(f"[DONE] Xi-selected  Test MSE {test_mse_xiSel:.4f} | xi_hard {test_hard_xi_xiSel:.4f}")
     print(f"Outputs saved to {args.outdir}")
 
 
@@ -414,7 +524,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--use_xi", action="store_true", help="Enable Xi regularizer")
     p.add_argument("--lambda_coef", type=float, default=1.0, help="Lambda for Xi")
     p.add_argument("--tau", type=float, default=0.1, help="Soft-rank tau")
-    p.add_argument("--epochs", type=int, default=60)
+    p.add_argument("--epochs", type=int, default=250)
     p.add_argument("--warmup_epochs", type=int, default=5)
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -431,4 +541,5 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
+    make_outdir(Path(args.outdir))
     main(args)
