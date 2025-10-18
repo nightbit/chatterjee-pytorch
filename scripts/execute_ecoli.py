@@ -1,5 +1,4 @@
 #execute_ecoli.py
-# execute_ecoli.py
 """
 End-to-end executor for E. coli (A2) experiments using the optional Xi regularizer.
 
