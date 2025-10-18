@@ -267,17 +267,13 @@ def main(args: argparse.Namespace) -> None:
     best_epoch_mse = -1
     best_epoch_xi_post = -1
 
-    # Track "any-epoch" xi best to warn if it came from warm-up (diagnostic only)
+    # Track "any-epoch" xi best to warn if it came from warm-up (when xi is enabled)
     best_val_hard_xi_any = float("-inf")
     best_epoch_xi_any = -1
 
     best_mse_path = checkpoints_dir / "best_mse.pt"
     best_xi_path = checkpoints_dir / "best_xi.pt"
     alias_best_path = checkpoints_dir / "best.pt"  # alias to best_mse for backward-compat
-
-    # NEW: ensure we always save at least one post-warmup xi-selected checkpoint
-    saved_any_xi_post = False
-
 
     # ---------- Training ----------
     for epoch in tqdm(range(1, args.epochs + 1), desc="Epochs"):
@@ -313,38 +309,20 @@ def main(args: argparse.Namespace) -> None:
             # keep alias aligned
             shutil.copyfile(best_mse_path, alias_best_path)
 
-        # ---- Selection: best by validation MSE ----
-        if val_mse < best_val_mse:
-            best_val_mse = float(val_mse)
-            best_epoch_mse = epoch
-            torch.save(model.state_dict(), best_mse_path)
-            shutil.copyfile(best_mse_path, alias_best_path)  # keep alias aligned
-
         # ---- Selection: best by validation hard xi ----
-        # Always track "any-epoch" best for diagnostics
+        # - If xi regularization is enabled, exclude warm-up epochs (epoch <= warmup)
+        #   from the xi-based selection to avoid picking a "baseline" snapshot.
+        # - Always track the "any-epoch" xi best for diagnostic warning.
         if val_hard_xi > best_val_hard_xi_any:
             best_val_hard_xi_any = float(val_hard_xi)
             best_epoch_xi_any = epoch
 
-        # Xi-selection is allowed post-warmup if xi is enabled; always allowed if xi is disabled (baseline)
         xi_selection_allowed = (not args.use_xi) or (epoch > args.warmup_epochs and getattr(criterion, "lambda_", 0) > 0)
 
-        if xi_selection_allowed:
-            # Seed: for xi-enabled runs, force-save the FIRST post-warmup eligible epoch as xi-selected,
-            # even if hard-ξ is NaN or not strictly improving. This guarantees a true post-warmup xi checkpoint.
-            if args.use_xi and not saved_any_xi_post:
-                torch.save(model.state_dict(), best_xi_path)
-                best_val_hard_xi = float(val_hard_xi) if np.isfinite(val_hard_xi) else float("-inf")
-                best_epoch_xi_post = epoch
-                saved_any_xi_post = True
-            else:
-                # NaN-safe comparison: treat NaN as -inf
-                cur = float(val_hard_xi) if np.isfinite(val_hard_xi) else float("-inf")
-                prev = float(best_val_hard_xi) if np.isfinite(best_val_hard_xi) else float("-inf")
-                if cur > prev:
-                    best_val_hard_xi = float(val_hard_xi)
-                    best_epoch_xi_post = epoch
-                    torch.save(model.state_dict(), best_xi_path)
+        if xi_selection_allowed and val_hard_xi > best_val_hard_xi:
+            best_val_hard_xi = float(val_hard_xi)
+            best_epoch_xi_post = epoch
+            torch.save(model.state_dict(), best_xi_path)
 
         if epoch % 10 == 0 or epoch == args.epochs:
             tqdm.write(
@@ -354,28 +332,12 @@ def main(args: argparse.Namespace) -> None:
                 f"Val xi_hard {val_hard_xi:.4f}"
             )
 
-        # If xi was enabled and the best xi overall came from warm-up, warn that we excluded it from selection.
-        if args.use_xi and best_epoch_xi_any != -1 and best_epoch_xi_any <= args.warmup_epochs:
-            print(
-                f"[WARN] Highest validation xi_hard occurs during warm-up epoch {best_epoch_xi_any} "
-                f"(lambda=0). Xi-selected checkpoint uses best post-warm-up epoch {best_epoch_xi_post}."
-            )
-
-        # Enforce the RQ3 guarantee:
-        if args.use_xi:
-            # For xi-enabled runs, we must have saved a post-warmup xi-selected checkpoint.
-            if not saved_any_xi_post or not best_xi_path.exists():
-                raise RuntimeError(
-                    "Invariant violated: no post-warmup xi-selected checkpoint was saved. "
-                    "This indicates the seeding logic failed—please investigate."
-                )
-        else:
-            # For baseline runs (xi disabled), keep previous permissive behavior:
-            if not best_xi_path.exists():
-                shutil.copyfile(best_mse_path, best_xi_path)
-                best_val_hard_xi = history['val_hard_xi'][best_epoch_mse - 1] if best_epoch_mse > 0 else float('nan')
-                best_epoch_xi_post = best_epoch_mse
-                print("[INFO] Using MSE-selected checkpoint as xi-selected fallback (xi disabled).")
+    # If xi was enabled and the best xi overall came from warm-up, warn that we excluded it.
+    if args.use_xi and best_epoch_xi_any != -1 and best_epoch_xi_any <= args.warmup_epochs:
+        print(
+            f"[WARN] Highest validation xi_hard occurs during warm-up epoch {best_epoch_xi_any} "
+            f"(lambda=0). Xi-selected checkpoint uses best post-warm-up epoch {best_epoch_xi_post}."
+        )
 
     # Safety: ensure xi checkpoint exists (in degenerate cases pick mse checkpoint)
     if not best_xi_path.exists():
