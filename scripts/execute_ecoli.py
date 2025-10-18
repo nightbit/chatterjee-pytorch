@@ -1,4 +1,4 @@
-#execute_ecoli.py
+# execute_ecoli.py
 """
 End-to-end executor for E. coli (A2) experiments using the optional Xi regularizer.
 
@@ -7,15 +7,21 @@ Task A2: Predict OD (24h) from Temperature (°C), Drug ∈ {ERY, TMP}, and Conce
 Outputs are written to
     runs/YYYYMMDD_HHMMSS_ecoli_exec/
 and include:
-    all_metrics.csv      - 1 row per trained model (baseline + Xi grid × seeds)
-    synth_metrics.csv    - synthetic noise sweep (Xi vs Spearman vs Pearson)
-    timing_bench.csv     - overhead numbers (100 training steps; baseline vs Xi)
-    stats_summary.txt    - paired t-test result on held-out hard xi
-    figures/*.png        - heat maps (xi, MSE, R2), synthetic scatter, timing bar
-    session.log          - full console log
+    all_metrics.csv        - 1 row per trained model (baseline + xi grid), expanded schema
+    best_models_rq2.csv    - per seed, baseline vs best-by-valMSE xi (report test_mse_mseSel)
+    best_models_rq3.csv    - per seed, baseline vs best-by-valHardXi xi (report test_hard_xi_xiSel)
+    stats_summary_rq2.txt  - corrected resampled t-test on MSE improvements (baseline - xi)
+    stats_summary_rq3.txt  - corrected resampled t-test on xi improvements (xi - baseline)
+    synth_metrics.csv      - synthetic noise sweep
+    timing_bench.csv       - overhead numbers
+    figures/heatmap_xi_xiSel.png             - mean test hard xi (xi-selected), λ×τ (xi only)
+    figures/heatmap_test_mse_mseSel.png      - mean test MSE (mse-selected), includes baseline at λ=0,τ=0
+    figures/heatmap_test_r2_mseSel.png       - mean test R² (mse-selected), includes baseline at λ=0,τ=0
+    figures/synth_scatter.png
+    figures/timing_overhead.png
+    session.log            - full console log
 
-This script mirrors execute_diabetes.py closely, with minimal changes to pass
-the required data_csv path down to run_ecoli.py.
+This script mirrors execute_diabetes.py, with the required data_csv path passed to run_ecoli.py.
 """
 from __future__ import annotations
 
@@ -79,6 +85,12 @@ SYN_N = 1000
 # Timing benchmark
 TIMING_STEPS = 100
 
+# Corrected resampled t-test parameters
+R = len(SEEDS)
+TRAIN_RATIO = 0.80
+TEST_RATIO = 0.10
+NB_C = (1.0 / R) + (TEST_RATIO / TRAIN_RATIO)  # = 0.1 + 0.125 = 0.225
+
 # --------------------------------------------------------------------------- #
 #  Session directories & logging                                              #
 # --------------------------------------------------------------------------- #
@@ -118,22 +130,15 @@ def run_one_ecoli(seed: int, use_xi: bool, lam: float, tau: float) -> Dict[str, 
     Train one model (or reuse cached results) and return its metrics row.
     Hard-fail if performance is clearly wrong, preventing wasted grid time.
     """
-    # Output directory per run
-    tag = f"s{seed}_xi{int(use_xi)}_l{lam}_t{tau}"
-    outdir = SESSION_DIR / tag
+    outdir = SESSION_DIR / f"s{seed}_xi{int(use_xi)}_l{lam}_t{tau}"
     summary_csv = outdir / "metrics_summary.csv"
 
     # Fast path: reuse existing, but only if all numbers are finite
     if summary_csv.exists():
         row = pd.read_csv(summary_csv).iloc[0].to_dict()
-        try:
-            # Only check numeric fields; strings in the CSV (if any) are ignored
-            numeric_vals = [v for v in row.values() if isinstance(v, (int, float, np.floating))]
-            if np.isfinite(numeric_vals).all():
-                return row
-        except Exception:
-            pass  # fall through to re-run if anything looks off
-        log.warning("Non-finite or malformed values in %s - re-running model.", summary_csv)
+        if np.isfinite(list(row.values())).all():
+            return row
+        log.warning("Non-finite values in %s - re-running model.", summary_csv)
 
     # Build argparse-like namespace expected by run_ecoli.main()
     args = SimpleNamespace(
@@ -162,30 +167,45 @@ def run_one_ecoli(seed: int, use_xi: bool, lam: float, tau: float) -> Dict[str, 
         raise RuntimeError(f"Missing metrics_summary.csv in {outdir}")
 
     row = pd.read_csv(summary_csv).iloc[0].to_dict()
+    if not np.isfinite(list(row.values())).all():
+        raise RuntimeError(f"Non-finite metric in {outdir}")
 
-    # Quick sanity threshold: R² should not be terrible
-    if float(row["test_r2"]) < 0.40:
+    # Quick sanity threshold: R² should not be terrible (on MSE-selected model)
+    if row["test_r2_mseSel"] < 0.40:
         log.warning(
-            "%sLow performance: seed=%d xi=%s  R2=%.3f%s",
+            "%sLow performance: seed=%d xi=%s  R2(mseSel)=%.3f%s",
             RED,
             seed,
             use_xi,
-            float(row["test_r2"]),
+            row["test_r2_mseSel"],
             RESET,
         )
 
     return row
 
 
-def paired_t(baseline: pd.Series, xi: pd.Series) -> Dict[str, float]:
-    diff = xi.values - baseline.values
+def paired_t_naive(diff: np.ndarray) -> Dict[str, float]:
     n = diff.shape[0]
-    mean_diff = diff.mean()
-    sd = diff.std(ddof=1)
+    mean_diff = float(diff.mean())
+    sd = float(diff.std(ddof=1))
     sem = sd / math.sqrt(n) if n > 0 else float("nan")
     t_val = mean_diff / sem if sem > 0 else float("inf")
     p_two = 2 * (1 - sp_stats.t.cdf(abs(t_val), df=n - 1)) if sem > 0 else 0.0
     return dict(n=n, mean=mean_diff, sd=sd, sem=sem, t=t_val, p=p_two)
+
+
+def nadeau_bengio_corrected_t(diff: np.ndarray, c: float) -> Dict[str, float]:
+    """
+    Nadeau–Bengio corrected resampled t-test.
+    se = sqrt( c * s^2 ), where c = 1/r + n_test/n_train.
+    """
+    n = diff.shape[0]
+    mean_diff = float(diff.mean())
+    s2 = float(diff.var(ddof=1))
+    se = math.sqrt(c * s2) if n > 1 and s2 >= 0 else float("nan")
+    t_val = mean_diff / se if se > 0 else float("inf")
+    p_two = 2 * (1 - sp_stats.t.cdf(abs(t_val), df=n - 1)) if se > 0 else 0.0
+    return dict(n=n, mean=mean_diff, var=s2, se=se, t=t_val, p=p_two, c=c)
 
 
 # --------------------------------------------------------------------------- #
@@ -205,7 +225,7 @@ for seed in SEEDS:
         "run %d completed, %d remaining. est minutes left: %.1f",
         total_runs_done,
         remaining,
-        (remaining * 0.5) / 60,  # coarse ETA: ~30s per run
+        (remaining * 0.5) / 60,
     )
 
     # Xi variants
@@ -226,39 +246,81 @@ all_df = pd.DataFrame(rows)
 all_df.to_csv(SESSION_DIR / "all_metrics.csv", index=False)
 
 # --------------------------------------------------------------------------- #
-#  2. Statistics: paired t-test                                               #
+#  2. Winner selection per seed & stats                                       #
 # --------------------------------------------------------------------------- #
-best_rows = []
+# Build per-seed comparison tables (one row per seed) for RQ2 and RQ3
+rq2_rows = []
+rq3_rows = []
+
 for seed in SEEDS:
-    # -------- baseline (Xi off) --------
     base = all_df[(all_df.seed == seed) & (all_df.use_xi == 0)].iloc[0]
-    best_rows.append(
-        {"seed": seed, "variant": "baseline", "test_hard_xi": base.test_hard_xi}
+
+    # RQ2: choose xi config with MINIMUM best_val_mse
+    cand2 = all_df[(all_df.seed == seed) & (all_df.use_xi == 1)]
+    win2 = cand2.loc[cand2.best_val_mse.idxmin()]
+
+    rq2_rows.append(
+        dict(
+            seed=seed,
+            base_test_mse_mseSel=base.test_mse_mseSel,
+            xi_lambda=win2.lambda_coef,
+            xi_tau=win2.tau,
+            xi_test_mse_mseSel=win2.test_mse_mseSel,
+        )
     )
 
-    # -------- Xi models for this seed --------
-    sub = all_df[(all_df.seed == seed) & (all_df.use_xi == 1)]
+    # RQ3: choose xi config with MAXIMUM best_val_hard_xi
+    cand3 = all_df[(all_df.seed == seed) & (all_df.use_xi == 1)]
+    win3 = cand3.loc[cand3.best_val_hard_xi.idxmax()]
 
-    # choose the λ,τ with the highest *validation* xi (same policy as diabetes)
-    winner = sub.loc[sub.val_xi.idxmax()]
-    best_rows.append(
-        {"seed": seed, "variant": "xi", "test_hard_xi": winner.test_hard_xi}
+    rq3_rows.append(
+        dict(
+            seed=seed,
+            base_test_hard_xi_xiSel=base.test_hard_xi_xiSel,
+            xi_lambda=win3.lambda_coef,
+            xi_tau=win3.tau,
+            xi_test_hard_xi_xiSel=win3.test_hard_xi_xiSel,
+        )
     )
 
-best_df = pd.DataFrame(best_rows)
+best_rq2_df = pd.DataFrame(rq2_rows)
+best_rq3_df = pd.DataFrame(rq3_rows)
 
-# paired t-test: Xi vs baseline, one row per seed
-xi_scores   = best_df[best_df.variant == "xi"].sort_values("seed").test_hard_xi
-base_scores = best_df[best_df.variant == "baseline"].sort_values("seed").test_hard_xi
-stats_res   = paired_t(base_scores, xi_scores)
+best_rq2_df.to_csv(SESSION_DIR / "best_models_rq2.csv", index=False)
+best_rq3_df.to_csv(SESSION_DIR / "best_models_rq3.csv", index=False)
 
-stats_path = SESSION_DIR / "stats_summary.txt"
-with stats_path.open("w") as fh:
-    fh.write(f"Paired t-test on hard xi (n={stats_res['n']})\n")
-    fh.write(f"mean diff  {stats_res['mean']:.4f}\n")
-    fh.write(f"t = {stats_res['t']:.4f},  p = {stats_res['p']:.5f}\n")
+# ---- Stats: Nadeau–Bengio corrected resampled t-tests ----
+# RQ2 (lower is better): diff_i = baseline_i - xi_i (positive => xi improves MSE)
+rq2_diff = best_rq2_df.base_test_mse_mseSel.values - best_rq2_df.xi_test_mse_mseSel.values
+rq2_nb = nadeau_bengio_corrected_t(rq2_diff, NB_C)
+rq2_naive = paired_t_naive(rq2_diff)
 
-log.info("Stats written to %s", stats_path.name)
+with (SESSION_DIR / "stats_summary_rq2.txt").open("w") as fh:
+    fh.write("Corrected resampled t-test (Nadeau–Bengio) on Test MSE improvements\n")
+    fh.write(f"r={R}, train={TRAIN_RATIO:.2f}, test={TEST_RATIO:.2f}, c={NB_C:.3f}\n")
+    fh.write(f"mean diff (base - xi) = {rq2_nb['mean']:.6f}\n")
+    fh.write(f"var={rq2_nb['var']:.6f}, se={rq2_nb['se']:.6f}\n")
+    fh.write(f"t = {rq2_nb['t']:.6f},  p(two-sided) = {rq2_nb['p']:.6f}\n")
+    fh.write("\nNaïve paired t-test (UNCORRECTED, anti-conservative)\n")
+    fh.write(f"n={rq2_naive['n']}, mean={rq2_naive['mean']:.6f}, sd={rq2_naive['sd']:.6f}, "
+             f"sem={rq2_naive['sem']:.6f}, t={rq2_naive['t']:.6f}, p={rq2_naive['p']:.6f}\n")
+
+# RQ3 (higher is better): diff_i = xi_i - baseline_i (positive => xi improves hard-ξ)
+rq3_diff = best_rq3_df.xi_test_hard_xi_xiSel.values - best_rq3_df.base_test_hard_xi_xiSel.values
+rq3_nb = nadeau_bengio_corrected_t(rq3_diff, NB_C)
+rq3_naive = paired_t_naive(rq3_diff)
+
+with (SESSION_DIR / "stats_summary_rq3.txt").open("w") as fh:
+    fh.write("Corrected resampled t-test (Nadeau–Bengio) on Test hard-ξ improvements\n")
+    fh.write(f"r={R}, train={TRAIN_RATIO:.2f}, test={TEST_RATIO:.2f}, c={NB_C:.3f}\n")
+    fh.write(f"mean diff (xi - base) = {rq3_nb['mean']:.6f}\n")
+    fh.write(f"var={rq3_nb['var']:.6f}, se={rq3_nb['se']:.6f}\n")
+    fh.write(f"t = {rq3_nb['t']:.6f},  p(two-sided) = {rq3_nb['p']:.6f}\n")
+    fh.write("\nNaïve paired t-test (UNCORRECTED, anti-conservative)\n")
+    fh.write(f"n={rq3_naive['n']}, mean={rq3_naive['mean']:.6f}, sd={rq3_naive['sd']:.6f}, "
+             f"sem={rq3_naive['sem']:.6f}, t={rq3_naive['t']:.6f}, p={rq3_naive['p']:.6f}\n")
+
+log.info("Stats written: stats_summary_rq2.txt, stats_summary_rq3.txt")
 
 # --------------------------------------------------------------------------- #
 #  3. Synthetic study                                                         #
@@ -336,55 +398,51 @@ tim_df.to_csv(SESSION_DIR / "timing_bench.csv", index=False)
 # --------------------------------------------------------------------------- #
 #  5. Figure generation                                                       #
 # --------------------------------------------------------------------------- #
-# Heat map mean xi by lambda and tau (Xi-only grid)
+# Heat map mean hard xi (xi-selected) by lambda and tau (xi models only)
 pivot_xi = (
     all_df[all_df.use_xi == 1]
     .groupby(["lambda_coef", "tau"])
-    .test_hard_xi.mean()
+    .test_hard_xi_xiSel.mean()
     .unstack()
     .sort_index()
+    .reindex(sorted(all_df[all_df.use_xi == 1].tau.unique(), key=float), axis=1)
 )
 plt.figure(figsize=(6, 4))
 im = plt.imshow(pivot_xi, aspect="auto", origin="lower", interpolation="nearest")
 plt.xticks(range(len(pivot_xi.columns)), pivot_xi.columns)
 plt.yticks(range(len(pivot_xi.index)), pivot_xi.index)
-plt.colorbar(im, label="mean hard xi")
+plt.colorbar(im, label="mean test hard xi (xi-selected)")
 plt.xlabel("tau")
 plt.ylabel("lambda")
-plt.title("E. coli A2: Xi dependency by lambda and tau")
+plt.title("Xi dependency by lambda and tau (xi-selected)")
 plt.tight_layout()
-plt.savefig(FIG_DIR / "heatmap_xi.png", dpi=120)
+plt.savefig(FIG_DIR / "heatmap_xi_xiSel.png", dpi=120)
 plt.close()
+log.info("heatmap_xi_xiSel.png saved")
 
-# === EXTRA HEATMAPS: MSE and R2 (keep baseline cell at λ=0, τ=0) ===
-metrics = {
-    "test_mse" : dict(title="E. coli A2: Mean Test MSE (lower is better)",
-                      cmap ="viridis_r"),   # reversed so low = bright
-    "test_r2"  : dict(title="E. coli A2: Mean Test R2 (higher is better)",
-                      cmap ="viridis"),
-}
-
-for metric, cfg in metrics.items():
+# Predictive heatmaps: include baseline cell at λ=0, τ=0
+for metric, fname, title in [
+    ("test_mse_mseSel", "heatmap_test_mse_mseSel.png", "Mean Test MSE (mse-selected, lower is better)"),
+    ("test_r2_mseSel",  "heatmap_test_r2_mseSel.png",  "Mean Test R² (mse-selected, higher is better)"),
+]:
     pivot = (
-        all_df                       # keep every run (baseline included)
+        all_df
         .groupby(["lambda_coef", "tau"])[metric]
         .mean()
-        .unstack()                   # rows = lambda, cols = tau
-        .sort_index()                # nice ordering
+        .unstack()
+        .sort_index()
         .reindex(sorted(all_df.tau.unique(), key=float), axis=1)
     )
 
     plt.figure(figsize=(6, 4))
-    im = plt.imshow(pivot, aspect="auto", origin="lower",
-                    cmap=cfg["cmap"], interpolation="nearest")
+    im = plt.imshow(pivot, aspect="auto", origin="lower", interpolation="nearest")
     plt.xticks(range(len(pivot.columns)), pivot.columns)
     plt.yticks(range(len(pivot.index)), pivot.index)
     plt.colorbar(im, label=f"mean {metric}")
     plt.xlabel("tau")
     plt.ylabel("lambda")
-    plt.title(cfg["title"])
+    plt.title(title)
     plt.tight_layout()
-    fname = f"heatmap_{metric}.png"
     plt.savefig(FIG_DIR / fname, dpi=120)
     plt.close()
     log.info("%s saved", fname)
@@ -421,9 +479,15 @@ log.info("Figures saved to %s", FIG_DIR.name)
 # --------------------------------------------------------------------------- #
 required = [
     SESSION_DIR / "all_metrics.csv",
+    SESSION_DIR / "best_models_rq2.csv",
+    SESSION_DIR / "best_models_rq3.csv",
+    SESSION_DIR / "stats_summary_rq2.txt",
+    SESSION_DIR / "stats_summary_rq3.txt",
     SESSION_DIR / "synth_metrics.csv",
     SESSION_DIR / "timing_bench.csv",
-    FIG_DIR / "heatmap_xi.png",
+    FIG_DIR / "heatmap_xi_xiSel.png",
+    FIG_DIR / "heatmap_test_mse_mseSel.png",
+    FIG_DIR / "heatmap_test_r2_mseSel.png",
 ]
 missing = [p.name for p in required if not p.exists()]
 if missing:
